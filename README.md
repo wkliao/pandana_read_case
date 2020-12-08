@@ -81,7 +81,8 @@ Parallel reads consist of the following steps.
                    0: root process reads evt.seq and broadcasts (default)
                    1: all processes read the entire evt.seq collectively
                    2: root process reads evt.seq and scatters boundaries
-                   3: A single MPI collective read all evt.seq and scatters boundaries
+                   3: A single MPI collective read all evt.seq, decompress, and scatters boundaries
+>                  4: POSIX read chunks of evt.seq, decompress, and scatter boundaries
     [-m number]    read method for other datasets (0 or 1)
                    0: use H5Dread (default)
                    1: use MPI_file_read_all one dataset at a time
