@@ -183,13 +183,15 @@ int read_dataset_names(int          rank,
         printf("Number of groups = %d\n",nGroups);
         printf("Maximum number of datasets among groups = %d\n",maxDsetGrp);
         if (seq_opt == 0)
-            printf("Read evt.seq method: root process reads and broadcasts\n");
+            printf("Read evt.seq method: root process H5Dread and broadcasts\n");
         else if (seq_opt == 1)
-            printf("Read evt.seq method: all processes read the entire evt.seq collectively\n");
+            printf("Read evt.seq method: all processes H5Dread the entire evt.seq collectively\n");
         else if (seq_opt == 2)
-            printf("Read evt.seq method: root process reads evt.seq and scatters boundaries\n");
+            printf("Read evt.seq method: root process H5Dread evt.seq and scatters boundaries\n");
         else if (seq_opt == 3)
             printf("Read evt.seq method: MPI collective read all evt.seq, decompress, and scatters boundaries\n");
+        else if (seq_opt == 4)
+            printf("Read evt.seq method: POSIX read one chunk at a time, decompress, and scatters boundaries\n");
 
         if (dset_opt == 0)
             printf("Read datasets method: H5Dread\n");
