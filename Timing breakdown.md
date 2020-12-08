@@ -1,4 +1,9 @@
 # Timing breakdown of end-to-end HDF5 read
+## Experiment settings
+    Number of processes: 128
+    Stripe count: 32
+    Stripe size: 1 MiB
+    File: ND 1951 file
 ## End-to-end HDF5 read time (14.58 sec):
 
     When reading "evt.seq" datasets (7.05 sec):
