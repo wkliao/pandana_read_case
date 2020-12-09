@@ -32,11 +32,15 @@
 static int verbose, debug;
 
 typedef struct {
-    int      nDatasets;  /* number of datasets in this group */
-    int     *nChunks;    /* number of chunks in each dataset */
-    char   **dset_names; /* string names of datasets */
-    void   **buf;        /* read buffers */
-    double  *read_t;     /* read timings */
+    int       nDatasets;  /* number of datasets in this group */
+    char    **dset_names; /* [nDatasets] string names of datasets */
+    void    **buf;        /* [nDatasets] read buffers */
+
+    size_t   *dtype_size; /* [nDatasets] size of data type of datasets */
+    hsize_t **dims;       /* [nDatasets][2] dimension sizes */
+    hsize_t **chunk_dims; /* [nDatasets][2] chunk dimension sizes */
+    size_t   *nChunks;    /* [nDatasets] number of chunks in each dataset */
+    double   *read_t;     /* [nDatasets] read timings */
 } NOvA_group;
 
 /*----< read_dataset_names() >-----------------------------------------------*/
@@ -142,13 +146,32 @@ int read_dataset_names(int          rank,
 
     *nTotalDatasets = 0;
     for (g=0; g<nGroups; g++) {
-        *nTotalDatasets += (*gList)[g].nDatasets;
-        /* allocate space to store number of chunks and initialize to zeros */
-        (*gList)[g].nChunks = (int*) calloc((*gList)[g].nDatasets, sizeof(int));
+        nDatasets = (*gList)[g].nDatasets;
+
+        *nTotalDatasets += nDatasets;
         /* allocate array of read buffer pointers */
-        (*gList)[g].buf = (void**) malloc((*gList)[g].nDatasets * sizeof(void*));
+        (*gList)[g].buf = (void**) malloc(nDatasets * sizeof(void*));
+
+        /* allocate space to store data type sizes */
+        (*gList)[g].dtype_size = (size_t*) calloc(nDatasets, sizeof(size_t));
+
+        /* allocate space to store dimension sizes */
+        (*gList)[g].dims = (hsize_t**) malloc(nDatasets * sizeof(hsize_t*));
+        (*gList)[g].dims[0] = (hsize_t*) malloc(nDatasets * 2 * sizeof(hsize_t*));
+        for (j=1; j<nDatasets; j++)
+            (*gList)[g].dims[j] = (*gList)[g].dims[j-1] + 2;
+
+        /* allocate space to store chunk dimension sizes */
+        (*gList)[g].chunk_dims = (hsize_t**) malloc(nDatasets * sizeof(hsize_t*));
+        (*gList)[g].chunk_dims[0] = (hsize_t*) malloc(nDatasets * 2 * sizeof(hsize_t*));
+        for (j=1; j<nDatasets; j++)
+            (*gList)[g].chunk_dims[j] = (*gList)[g].chunk_dims[j-1] + 2;
+
+        /* allocate space to store number of chunks and initialize to zeros */
+        (*gList)[g].nChunks = (size_t*) calloc(nDatasets, sizeof(size_t));
+
         /* allocate space to store read timings */
-        (*gList)[g].read_t = (double*) calloc((*gList)[g].nDatasets, sizeof(double));
+        (*gList)[g].read_t = (double*) calloc(nDatasets, sizeof(double));
     }
 
     if (debug && rank == 0) {
@@ -170,7 +193,7 @@ int read_dataset_names(int          rank,
         else if (seq_opt == 3)
             printf("Read evt.seq method: MPI collective read all evt.seq, decompress, and scatters boundaries\n");
         else if (seq_opt == 4)
-            printf("Read evt.seq method: POSIX read one chunk at a time, decompress, and scatters boundaries\n");
+            printf("Read evt.seq method: root POSIX reads one chunk at a time, decompress, and scatters boundaries\n");
 
         if (dset_opt == 0)
             printf("Read datasets method: H5Dread\n");
@@ -201,25 +224,27 @@ int collect_metadata(hid_t       fd,
         for (d=0; d<groups[g].nDatasets; d++) {
             herr_t err;
             hid_t dset;
+            hsize_t *dims       = groups[g].dims[d];
+            hsize_t *chunk_dims = groups[g].chunk_dims[d];
 
             /* open dataset */
             dset = H5Dopen2(fd, groups[g].dset_names[d], H5P_DEFAULT); assert(dset >= 0);
 
             /* inquire dimension sizes of dset */
             hid_t fspace = H5Dget_space(dset); assert(fspace >= 0);
-            err = H5Sget_simple_extent_dims(fspace, groups[g].dims[d], NULL); assert(err>=0);
+            err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err>=0);
             err = H5Sclose(fspace); assert(err >= 0);
+
+            /* inquire chunk size along each dimension */
+            hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
+            int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
+            assert(chunk_ndims == 2);
+            err = H5Pclose(chunk_plist); assert(err>=0);
 
             /* get data type and size */
             hid_t dtype = H5Dget_type(dset); assert(dtype >= 0);
             groups[g].dtype_size[d] = H5Tget_size(dtype); assert(groups[g].dtype_size[d] > 0);
             err = H5Tclose(dtype); assert(err >= 0);
-
-            /* inquire chunk size along each dimension */
-            hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
-            int chunk_ndims = H5Pget_chunk(chunk_plist, 2, groups[g].chunk_dims[d]);
-            assert(chunk_ndims == 2);
-            err = H5Pclose(chunk_plist); assert(err>=0);
 
             /* find the number of chunks of dset */
             size_t nChunks[2];
@@ -246,28 +271,45 @@ int collect_metadata(hid_t       fd,
  * the range of event IDs responsible by process rank.
  */
 static
-int calculate_starts_ends(hid_t    fd,
-                          int      nprocs,
-                          int      rank,
-                          hsize_t *starts,  /* OUT */
-                          hsize_t *ends,    /* OUT */
-                          hsize_t *nEvts)   /* OUT */
+int calculate_starts_ends(hid_t       fd,
+                          int         nprocs,
+                          int         rank,
+                          NOvA_group *group,   /* /spill grroup */
+                          hsize_t    *starts,  /* OUT */
+                          hsize_t    *ends,    /* OUT */
+                          hsize_t    *nEvts)   /* OUT */
 {
     herr_t err;
     hid_t seq, fspace;
-    hsize_t j, ndims, dims[5], my_count;
+    hsize_t j, ndims, my_count;
 
     /* open dataset '/spill/evt.seq' */
     seq = H5Dopen2(fd, "/spill/evt.seq", H5P_DEFAULT); assert(seq >= 0);
 
+    hsize_t *dims = group->dims[0];
+    hsize_t *chunk_dims = group->chunk_dims[0];
+
     /* inquire dimension size of '/spill/evt.seq' */
     fspace = H5Dget_space(seq); assert(fspace >= 0);
     ndims = H5Sget_simple_extent_ndims(fspace); assert(ndims == 2);
-    err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err >= 0);
+    err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err>=0);
     /* 2nd dimension of /spill/evt.seq is always 1 */
     assert(dims[1] == 1);
 
-    *nEvts = dims[0];
+    /* inquire chunk size along each dimension */
+    hid_t chunk_plist = H5Dget_create_plist(seq); assert(chunk_plist >= 0);
+    int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
+    assert(chunk_ndims == 2);
+    assert(chunk_dims[1] == 1);
+    err = H5Pclose(chunk_plist); assert(err>=0);
+
+    /* get data type and size */
+    hid_t dtype = H5Dget_type(seq); assert(dtype >= 0);
+    assert(H5Tequal(dtype, H5T_STD_I64LE) > 0);
+    group->dtype_size[0] = H5Tget_size(dtype); assert(group->dtype_size[0] > 0);
+    err = H5Tclose(dtype); assert(err >= 0);
+
+    *nEvts = group->dims[0][0];
     if (verbose && rank == 0)
         printf("Size of /spill/evt.seq is %zd\n", (size_t)(*nEvts));
 
@@ -361,7 +403,6 @@ off_compare(const void *a, const void *b)
     return 0;
 }
 
- 
 /*----< read_dataset_posix() >------------------------------------------------*/
 /* Call POSIX read to read a dataset, decompress it, and copy to user buffer */
 static
@@ -370,14 +411,21 @@ int read_dataset_posix(hid_t       fd,
                        NOvA_group *group,
                        int         dset_idx,
                        int         profile,
-                       hsize_t    *dims,       /* OUT */
                        double     *inflate_t)  /* OUT */
 {
     int j;
     herr_t err;
-    hsize_t offset[2], chunk_dims[2];
+    hsize_t offset[2];
+    hsize_t *dims = group->dims[dset_idx];
+    hsize_t *chunk_dims = group->chunk_dims[dset_idx];
 
     hid_t dset = H5Dopen2(fd, group->dset_names[dset_idx], H5P_DEFAULT); assert(dset >= 0);
+
+    /* inquire dimension sizes of dset */
+    hid_t fspace = H5Dget_space(dset); assert(fspace >= 0);
+    err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err>=0);
+    assert(dims[1] == 1);
+    err = H5Sclose(fspace); assert(err >= 0);
 
     /* inquire chunk size along each dimension */
     hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
@@ -386,20 +434,15 @@ int read_dataset_posix(hid_t       fd,
     assert(chunk_dims[1] == 1);
     err = H5Pclose(chunk_plist); assert(err>=0);
 
-    /* inquire dimension sizes of dset */
-    hid_t fspace = H5Dget_space(dset); assert(fspace >= 0);
-    err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err>=0);
-    assert(dims[1] == 1);
-    err = H5Sclose(fspace); assert(err >= 0);
+    hid_t dtype = H5Dget_type(dset); assert(dtype >= 0);
+    size_t dtype_size = H5Tget_size(dtype); assert(dtype_size > 0);
+    group->dtype_size[dset_idx] = dtype_size;
+    err = H5Tclose(dtype); assert(err >= 0);
+    group->buf[dset_idx] = (void*) malloc(dims[0] * dtype_size);
 
     /* find the number of chunks to be read by this process */
     group->nChunks[dset_idx] = dims[0] / chunk_dims[0];
     if (dims[0] % chunk_dims[0]) group->nChunks[dset_idx]++;
-
-    hid_t dtype = H5Dget_type(dset); assert(dtype >= 0);
-    size_t dtype_size = H5Tget_size(dtype); assert(dtype_size > 0);
-    err = H5Tclose(dtype); assert(err >= 0);
-    group->buf[dset_idx] = (void*) malloc(dims[0] * dtype_size);
 
     /* collect offsets of all chunks */
     size_t chunk_size = chunk_dims[0] * dtype_size;
@@ -421,14 +464,16 @@ int read_dataset_posix(hid_t       fd,
         haddr_t addr;
         hsize_t size;
         ssize_t len;
+        double timing;
+
         err = H5Dget_chunk_info_by_coord(dset, offset, NULL, &addr, &size); assert(err>=0);
         if (profile == 2) group->read_t[dset_idx]=MPI_Wtime();
         lseek(posix_fd, addr, SEEK_SET);
         len = read(posix_fd, chunk_buf, size);
         assert(len == size);
-        if (profile == 2) group->read_t[dset_idx]=MPI_Wtime()-group->read_t[dset_idx];
+        timing = MPI_Wtime();
+        if (profile == 2) group->read_t[dset_idx]=timing-group->read_t[dset_idx];
 
-        double timing = MPI_Wtime();
         int ret;
         z_stream z_strm;
         z_strm.zalloc    = Z_NULL;
@@ -476,7 +521,6 @@ int read_evt_seq_aggr_all(hid_t           fd,
     hsize_t nChunks=0, offset[2], max_chunk_dim=0, **size;
     haddr_t **addr;
     size_t dtype_size=8, read_len=0;
-    hsize_t *chunk_dims, *dims_0;
     MPI_Status status;
 
     if (nGroups == 0 || (nGroups == 1 && spill_grp == 0)) {
@@ -496,54 +540,48 @@ int read_evt_seq_aggr_all(hid_t           fd,
     addr = (haddr_t**) malloc(nGroups * sizeof(haddr_t*));
     size = (hsize_t**) malloc(nGroups * sizeof(hsize_t*));
 
-    /* save chunk dimensions of all evt.seq for later use */
-    chunk_dims = (hsize_t*) malloc(nGroups * 2 * sizeof(hsize_t));
-    dims_0     = chunk_dims + nGroups;
-
     /* collect sizes of dimensions and chunk dimensions of evt.seq datasets in
      * all groups. Also inquire number of chunks and their file offsets and
      * compressed sizes
      */
     for (g=0; g<nGroups; g++) {
+        hsize_t *dims       = groups[g].dims[0];
+        hsize_t *chunk_dims = groups[g].chunk_dims[0];
 
         /* skip dataset evt.seq in group /spill */
         if (g == spill_grp) continue;
 
         hid_t seq = H5Dopen2(fd, groups[g].dset_names[0], H5P_DEFAULT); assert(seq >= 0);
 
-        /* inquire chunk size along each dimension */
-        hsize_t dims[2];
-        hid_t chunk_plist = H5Dget_create_plist(seq); assert(chunk_plist >= 0);
-        int chunk_ndims = H5Pget_chunk(chunk_plist, 2, dims);
-        assert(chunk_ndims == 2);
-        assert(dims[1] == 1);
-        err = H5Pclose(chunk_plist); assert(err>=0);
-        chunk_dims[g] = dims[0];
-        max_chunk_dim = MAX(max_chunk_dim, chunk_dims[g]);
-
         /* inquire dimension sizes of dset */
         hid_t fspace = H5Dget_space(seq); assert(fspace >= 0);
         err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err>=0);
         assert(dims[1] == 1);
         err = H5Sclose(fspace); assert(err >= 0);
-        dims_0[g] = dims[0];
+
+        /* inquire chunk size along each dimension */
+        hid_t chunk_plist = H5Dget_create_plist(seq); assert(chunk_plist >= 0);
+        int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
+        assert(chunk_ndims == 2);
+        assert(chunk_dims[1] == 1);
+        err = H5Pclose(chunk_plist); assert(err>=0);
+        max_chunk_dim = MAX(max_chunk_dim, chunk_dims[0]);
+
+        /* evt.seq data type is aways H5T_STD_I64LE and of size 8 bytes */
+        hid_t dtype = H5Dget_type(seq);
+        assert(H5Tequal(dtype, H5T_STD_I64LE) > 0);
+        dtype_size = H5Tget_size(dtype); assert(dtype_size > 0);
+        assert(dtype_size == 8); /* evt.seq is always of type int64_t */
+        groups[g].dtype_size[0] = dtype_size;
+        err = H5Tclose(dtype); assert(err >= 0);
+        groups[g].buf[0] = (void*) malloc(dims[0] * dtype_size);
 
         /* find the number of chunks to be read by this process */
-        groups[g].nChunks[0] = dims[0] / chunk_dims[g];
-        if (dims[0] % chunk_dims[g]) groups[g].nChunks[0]++;
+        groups[g].nChunks[0] = dims[0] / chunk_dims[0];
+        if (dims[0] % chunk_dims[0]) groups[g].nChunks[0]++;
 
         /* acculumate number of chunks across all groups */
         nChunks += groups[g].nChunks[0];
-
-        /* evt.seq data type is aways H5T_STD_I64LE and of size 8 bytes */
-        if (debug) {
-            hid_t dtype = H5Dget_type(seq);
-            assert(H5Tequal(dtype, H5T_STD_I64LE) > 0);
-            dtype_size = H5Tget_size(dtype);
-            assert(dtype_size == 8); /* evt.seq is always of type int64_t */
-            err = H5Tclose(dtype); assert(err >= 0);
-        }
-        groups[g].buf[0] = (void*) malloc(dims[0] * dtype_size);
 
         /* collect offsets and sizes of individual chunks of evt.seq */
         addr[g] = (haddr_t*) malloc(groups[g].nChunks[0] * sizeof(haddr_t));
@@ -552,7 +590,7 @@ int read_evt_seq_aggr_all(hid_t           fd,
         for (j=0; j<groups[g].nChunks[0]; j++) {
             err = H5Dget_chunk_info_by_coord(seq, offset, NULL, &addr[g][j], &size[g][j]); assert(err>=0);
             read_len += size[g][j];
-            offset[0] += chunk_dims[g];
+            offset[0] += chunk_dims[0];
         }
         err = H5Dclose(seq); assert(err >= 0);
     }
@@ -648,9 +686,9 @@ int read_evt_seq_aggr_all(hid_t           fd,
         /* copy requested data to user buffer */
         g = disp_indx[j].block_idx % nGroups;  /* group ID */
         d = disp_indx[j].block_idx / nGroups;  /* chunk ID of evt.seq in group g */
-        size_t len = chunk_dims[g] * dtype_size;
+        size_t len = groups[g].chunk_dims[0][0] * dtype_size;
         size_t off = len * d;
-        size_t last_len = dims_0[g] % chunk_dims[g];
+        size_t last_len = groups[g].dims[0][0] % groups[g].chunk_dims[0][0];
         if (d == groups[g].nChunks[0] - 1 && last_len > 0) /* last chunk size may not be a whole chunk */
             len = last_len * dtype_size;
         memcpy(groups[g].buf[0] + off, whole_chunk, len);
@@ -667,12 +705,11 @@ int read_evt_seq_aggr_all(hid_t           fd,
     for (g=0; g<nGroups; g++) {
         if (g == spill_grp) continue;
         for (j=0, k=0; j<nprocs; j++) {
-            bounds[g][k++] = binary_search_min(starts[j], groups[g].buf[0], dims_0[g]);
-            bounds[g][k++] = binary_search_max(ends[j],   groups[g].buf[0], dims_0[g]);
+            bounds[g][k++] = binary_search_min(starts[j], groups[g].buf[0], groups[g].dims[0][0]);
+            bounds[g][k++] = binary_search_max(ends[j],   groups[g].buf[0], groups[g].dims[0][0]);
         }
         free(groups[g].buf[0]);
     }
-    free(chunk_dims);
     return 1;
 }
 
@@ -701,7 +738,6 @@ int read_evt_seq(hid_t          fd,
     int g, j, k;
     herr_t err;
     hid_t seq;
-    hsize_t ndims, dims[5];
     long long low_high[2];
     int64_t *seq_buf=NULL;
 
@@ -793,10 +829,10 @@ int read_evt_seq(hid_t          fd,
             /* root process reads each evt.seq and scatters boundaries */
             if (rank == 0) {
                 /* read_dataset_posix() is an independent call */
-                err = read_dataset_posix(fd, posix_fd, groups+g, 0, profile, dims, inflate_t);
+                err = read_dataset_posix(fd, posix_fd, groups+g, 0, profile, inflate_t);
                 for (j=0, k=0; j<nprocs; j++) {
-                    bounds[k++] = binary_search_min(starts[j], groups[g].buf[0], dims[0]);
-                    bounds[k++] = binary_search_max(ends[j],   groups[g].buf[0], dims[0]);
+                    bounds[k++] = binary_search_min(starts[j], groups[g].buf[0], groups[g].dims[0][0]);
+                    bounds[k++] = binary_search_max(ends[j],   groups[g].buf[0], groups[g].dims[0][0]);
                 }
                 free(groups[g].buf[0]);
             }
@@ -827,15 +863,25 @@ int read_evt_seq(hid_t          fd,
         seq = H5Dopen2(fd, groups[g].dset_names[0], H5P_DEFAULT); assert(seq >= 0);
 
         /* inquire dimension sizes of 'evt.seq' in this group */
+        hsize_t *dims = groups[g].dims[0];
         hid_t fspace = H5Dget_space(seq); assert(fspace >= 0);
-        ndims = H5Sget_simple_extent_ndims(fspace); assert(ndims == 2);
+        hsize_t ndims = H5Sget_simple_extent_ndims(fspace); assert(ndims == 2);
         err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err>=0);
         assert(dims[1] == 1);
         err = H5Sclose(fspace); assert(err >= 0);
 
+        /* inquire chunk size along each dimension */
+        hsize_t *chunk_dims = groups[g].chunk_dims[0];
+        hid_t chunk_plist = H5Dget_create_plist(seq); assert(chunk_plist >= 0);
+        int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
+        assert(chunk_ndims == 2);
+        assert(chunk_dims[1] == 1);
+        err = H5Pclose(chunk_plist); assert(err>=0);
+
         /* data type of evt.seq is 64-bit integer */
         hid_t dtype = H5Dget_type(seq); assert(dtype >= 0);
         size_t dtype_size = H5Tget_size(dtype); assert(dtype_size > 0);
+        groups[g].dtype_size[0] = dtype_size;
         err = H5Tclose(dtype); assert(err >= 0);
 
         if (seq_opt == 2) {
@@ -920,7 +966,7 @@ int read_hdf5(hid_t       fd,
     int d;
     herr_t  err;
     hid_t   dset, fspace, mspace, dtype;
-    hsize_t ndims, dims[5], start[2], count[2];
+    hsize_t start[2], count[2];
     size_t read_len;
 
     /* iterate all the remaining datasets in this group */
@@ -933,9 +979,18 @@ int read_hdf5(hid_t       fd,
         dset = H5Dopen2(fd, group->dset_names[d], H5P_DEFAULT); assert(dset >= 0);
 
         /* inquire dimension sizes of dset */
+        hsize_t *dims = group->dims[d];
         fspace = H5Dget_space(dset); assert(fspace >= 0);
-        ndims = H5Sget_simple_extent_ndims(fspace); assert(ndims == 2);
+        hsize_t ndims = H5Sget_simple_extent_ndims(fspace); assert(ndims == 2);
         err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err>=0);
+
+        /* inquire chunk size along each dimension */
+        hsize_t *chunk_dims = group->chunk_dims[d];
+        hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
+        int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
+        assert(chunk_ndims == 2);
+        assert(chunk_dims[1] == 1);
+        err = H5Pclose(chunk_plist); assert(err>=0);
 
         /* set subarray/hyperslab access */
         start[0] = low;
@@ -948,10 +1003,10 @@ int read_hdf5(hid_t       fd,
 
         /* get data type and size */
         dtype = H5Dget_type(dset); assert(dtype >= 0);
-        size_t dtype_size = H5Tget_size(dtype); assert(dtype_size > 0);
+        group->dtype_size[d] = H5Tget_size(dtype); assert(group->dtype_size[d] > 0);
 
         /* calculate read size in bytes and allocate read buffers */
-        read_len = count[0] * count[1] * dtype_size;
+        read_len = count[0] * count[1] * group->dtype_size[d];
         group->buf[d] = (void*) malloc(read_len);
 
         /* collectively read dataset d's contents */
@@ -996,7 +1051,9 @@ int read_mpio(hid_t       fd,
     MPI_Status status;
 
     for (d=1; d<group->nDatasets; d++) {
-        hsize_t dims[5], chunk_dims[2];
+        hsize_t *dims       = group->dims[d];
+        hsize_t *chunk_dims = group->chunk_dims[d];
+
         /* open dataset */
         dset = H5Dopen2(fd, group->dset_names[d], H5P_DEFAULT); assert(dset >= 0);
 
@@ -1007,21 +1064,22 @@ int read_mpio(hid_t       fd,
         err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err>=0);
         err = H5Sclose(fspace); assert(err >= 0);
 
-        /* get data type and size */
-        hid_t dtype = H5Dget_type(dset); assert(dtype >= 0);
-        size_t dtype_size = H5Tget_size(dtype); assert(dtype_size > 0);
-        err = H5Tclose(dtype); assert(err >= 0);
-
-        /* calculate buffer read size in bytes and allocate read buffer */
-        read_len = (high - low + 1) * dims[1] * dtype_size;
-        group->buf[d] = (void*) malloc(read_len);
-
         /* inquire chunk size along each dimension */
         hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
         int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
         assert(chunk_ndims == 2);
         assert(chunk_dims[1] == 1);
         err = H5Pclose(chunk_plist); assert(err>=0);
+
+        /* get data type and size */
+        hid_t dtype = H5Dget_type(dset); assert(dtype >= 0);
+        size_t dtype_size = H5Tget_size(dtype); assert(dtype_size > 0);
+        group->dtype_size[d] = dtype_size;
+        err = H5Tclose(dtype); assert(err >= 0);
+
+        /* calculate buffer read size in bytes and allocate read buffer */
+        read_len = (high - low + 1) * dims[1] * dtype_size;
+        group->buf[d] = (void*) malloc(read_len);
 
         hsize_t nChunks, offset[2];
 
@@ -1172,16 +1230,12 @@ int read_mpio_aggr(hid_t       fd,
     int d, j, k, mpi_err;
     herr_t  err;
     hid_t   dset;
-    hsize_t **size, *chunk_dims, *dims_0;
+    hsize_t **size;
     haddr_t **addr;
     size_t nChunks, max_chunk_size, read_len, *dtype_size;
     MPI_Status status;
 
-    /* save chunk dimensions of all datasets in group g for later use */
-    chunk_dims = (hsize_t*) malloc(group->nDatasets * 2 * sizeof(hsize_t));
-    dims_0     = chunk_dims + group->nDatasets;
-
-    dtype_size = (size_t*) malloc(group->nDatasets * sizeof(size_t));
+    dtype_size = group->dtype_size;
 
     /* allocate space to save file offsets and sizes of individual chunks */
     addr = (haddr_t**) malloc(group->nDatasets * sizeof(haddr_t*));
@@ -1194,36 +1248,35 @@ int read_mpio_aggr(hid_t       fd,
     read_len = 0;
     max_chunk_size = 0;
     for (d=1; d<group->nDatasets; d++) {
-        hsize_t dims[2];
+        hsize_t *dims       = group->dims[d];
+        hsize_t *chunk_dims = group->chunk_dims[d];
 
         /* open dataset */
         dset = H5Dopen2(fd, group->dset_names[d], H5P_DEFAULT); assert(dset >= 0);
-
-        /* inquire chunk size along each dimension */
-        hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
-        int chunk_ndims = H5Pget_chunk(chunk_plist, 2, dims);
-        assert(chunk_ndims == 2);
-        assert(dims[1] == 1);
-        err = H5Pclose(chunk_plist); assert(err>=0);
-        chunk_dims[d] = dims[0];
 
         /* inquire dimension sizes of dset */
         hid_t fspace = H5Dget_space(dset); assert(fspace >= 0);
         err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err>=0);
         err = H5Sclose(fspace); assert(err >= 0);
-        dims_0[d] = dims[0];
+
+        /* inquire chunk size along each dimension */
+        hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
+        int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
+        assert(chunk_ndims == 2);
+        assert(chunk_dims[1] == 1);
+        err = H5Pclose(chunk_plist); assert(err>=0);
 
         /* get data type and size */
         hid_t dtype = H5Dget_type(dset); assert(dtype >= 0);
         dtype_size[d] = H5Tget_size(dtype); assert(dtype_size[d] > 0);
         err = H5Tclose(dtype); assert(err >= 0);
-        max_chunk_size = MAX(max_chunk_size, chunk_dims[d] * dtype_size[d]);
+        max_chunk_size = MAX(max_chunk_size, chunk_dims[0] * dtype_size[d]);
 
         /* calculate buffer read size in bytes and allocate read buffer */
         group->buf[d] = (void*) malloc((high - low + 1) * dims[1] * dtype_size[d]);
 
         /* find the number of chunks to be read by this process */
-        group->nChunks[d] = (high / chunk_dims[d]) - (low / chunk_dims[d]) + 1;
+        group->nChunks[d] = (high / chunk_dims[0]) - (low / chunk_dims[0]) + 1;
         nChunks += group->nChunks[d];
 
         /* collect offsets of all chunks of this dataset */
@@ -1233,7 +1286,7 @@ int read_mpio_aggr(hid_t       fd,
         for (j=0; j<group->nChunks[d]; j++) {
             err = H5Dget_chunk_info_by_coord(dset, offset, NULL, &addr[d][j], &size[d][j]); assert(err>=0);
             read_len += size[d][j];
-            offset[0] += chunk_dims[d];
+            offset[0] += chunk_dims[0];
         }
         err = H5Dclose(dset); assert(err >= 0);
     }
@@ -1325,32 +1378,34 @@ int read_mpio_aggr(hid_t       fd,
         ret = inflateEnd(&z_strm); assert(ret == Z_OK);
 
         /* copy requested data to user buffer */
+        hsize_t *chunk_dims;
         d = disp_indx[j].block_idx % group->nDatasets;  /* dataset ID */
         k = disp_indx[j].block_idx / group->nDatasets;  /* chunk ID of dataset d */
+        chunk_dims = group->chunk_dims[d];
         /* copy requested data to user buffer */
         if (k == 0) { /* dataset d's first chunk */
-            size_t off = low % chunk_dims[d];
+            size_t off = low % chunk_dims[0];
             size_t len;
             if (group->nChunks[d] == 1)
                 len = high - low + 1;
             else
-                len = chunk_dims[d] - off;
+                len = chunk_dims[0] - off;
             len *= dtype_size[d];
             off *= dtype_size[d];
             memcpy(group->buf[d], whole_chunk + off, len);
         }
         else if (k == group->nChunks[d] - 1) { /* dataset d's last chunk */
-            size_t len = (high+1) % chunk_dims[d];
-            if (len == 0) len = chunk_dims[d];
+            size_t len = (high+1) % chunk_dims[0];
+            if (len == 0) len = chunk_dims[0];
             size_t off = high + 1 - len - low;
             off *= dtype_size[d];
             len *= dtype_size[d];
             memcpy(group->buf[d] + off, whole_chunk, len);
         }
         else { /* middle chunk, copy the full chunk */
-            size_t len = chunk_dims[d] * dtype_size[d];
-            size_t off = chunk_dims[d] - low % chunk_dims[d];
-            off += (k - 1) * chunk_dims[d];
+            size_t len = chunk_dims[0] * dtype_size[d];
+            size_t off = chunk_dims[0] - low % chunk_dims[0];
+            off += (k - 1) * chunk_dims[0];
             off *= dtype_size[d];
             memcpy(group->buf[d] + off, whole_chunk, len);
         }
@@ -1359,8 +1414,6 @@ int read_mpio_aggr(hid_t       fd,
     free(whole_chunk);
     free(chunk_buf);
     free(disp_indx);
-    free(dtype_size);
-    free(chunk_dims);
     *inflate_t += MPI_Wtime() - timing;
 
     return 1;
@@ -1380,7 +1433,6 @@ int chunk_statistics(MPI_Comm    comm,
 {
     herr_t  err;
     hid_t   fd, dset;
-    hsize_t ndims, dims[2];
 
     int g, d, j, k, nprocs, rank, nDatasets;
     int nchunks_shared=0, max_shared_chunks=0;
@@ -1424,23 +1476,32 @@ int chunk_statistics(MPI_Comm    comm,
             long long low_high[2];
 
             if (rank == 0) {
+                hsize_t dims[2], chunk_dims[2];
+
                 /* open dataset 'evt.seq', first in the group */
                 hid_t seq = H5Dopen2(fd, groups[g].dset_names[0], H5P_DEFAULT); assert(seq >= 0);
 
-                /* inquire the size of 'evt.seq' in this group */
+                /* collect metadata of ect.seq again, as root may not have
+                 * collected metadata of all evt.seq
+                 */
+
+                /* inquire dimension sizes of dset */
                 hid_t fspace = H5Dget_space(seq); assert(fspace >= 0);
-                ndims = H5Sget_simple_extent_ndims(fspace); assert(ndims == 2);
                 err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err>=0);
                 err = H5Sclose(fspace); assert(err >= 0);
 
                 /* inquire chunk size along each dimension */
-                hid_t chunk_plist;
-                hsize_t chunk_dims[2];
-                chunk_plist = H5Dget_create_plist(seq); assert(chunk_plist >= 0);
+                hid_t chunk_plist = H5Dget_create_plist(seq); assert(chunk_plist >= 0);
                 int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
                 assert(chunk_ndims == 2);
-                assert(chunk_dims[1] == 1);
                 err = H5Pclose(chunk_plist); assert(err>=0);
+
+                /* data type of evt.seq is 64-bit integer */
+                hid_t dtype = H5Dget_type(seq); assert(dtype >= 0);
+                size_t dtype_size = H5Tget_size(dtype); assert(dtype_size > 0);
+                err = H5Tclose(dtype); assert(err >= 0);
+                all_evt_seq_size += dims[0] * dims[1] * dtype_size;
+
                 groups[g].nChunks[0] = dims[0] / chunk_dims[0];
                 if (dims[0] % chunk_dims[0]) groups[g].nChunks[0]++;
 
@@ -1448,12 +1509,6 @@ int chunk_statistics(MPI_Comm    comm,
 
                 my_nchunks_read += groups[g].nChunks[0];
                 total_nchunks += groups[g].nChunks[0];
-
-                /* data type of evt.seq is 64-bit integer */
-                hid_t dtype = H5Dget_type(seq); assert(dtype >= 0);
-                size_t dtype_size = H5Tget_size(dtype); assert(dtype_size > 0);
-                all_evt_seq_size += dims[0] * dims[1] * dtype_size;
-                err = H5Tclose(dtype); assert(err >= 0);
 
                 /* calculate read sizes of compressed data */
                 hsize_t offset[2]={0, 0};
@@ -1489,26 +1544,29 @@ int chunk_statistics(MPI_Comm    comm,
         }
 
         for (d=1; d<groups[g].nDatasets; d++) {
-            hsize_t chunk_dims[2];
+            hsize_t dims[2], chunk_dims[2];
 
             /* open dataset */
             dset = H5Dopen2(fd, groups[g].dset_names[d], H5P_DEFAULT); assert(dset >= 0);
 
+            /* collect metadata of ect.seq again, as this process may not have
+             * collected metadata of all evt.seq
+             */
+
             /* inquire dimension sizes of dset */
             hid_t fspace = H5Dget_space(dset); assert(fspace >= 0);
-            ndims = H5Sget_simple_extent_ndims(fspace); assert(ndims == 2);
             err = H5Sget_simple_extent_dims(fspace, dims, NULL); assert(err>=0);
+            err = H5Sclose(fspace); assert(err >= 0);
 
+            /* inquire chunk size along each dimension */
+            hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
+            int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
+            err = H5Pclose(chunk_plist); assert(err>=0);
+
+            /* data type of evt.seq is 64-bit integer */
             hid_t dtype = H5Dget_type(dset); assert(dtype >= 0);
             size_t dtype_size = H5Tget_size(dtype); assert(dtype_size > 0);
             err = H5Tclose(dtype); assert(err >= 0);
-
-            /* inquire chunk size along each dimension */
-            hid_t chunk_plist;
-            chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
-            int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims); assert(chunk_ndims == 2);
-            assert(chunk_dims[1] == 1);
-            err = H5Pclose(chunk_plist); assert(err>=0);
 
             /* calculate number of chunks of this dataset */
             groups[g].nChunks[d] = dims[0] / chunk_dims[0];
@@ -1655,9 +1713,8 @@ int main(int argc, char **argv) {
     int c, d, g, nprocs, rank, nDatasets, nGroups, mpi_err;
     char *listfile=NULL, *infile=NULL;
     size_t *lowers, *uppers;
-    double open_t, read_seq_t, read_dset_t, close_t, inflate_t=0.0;
-    double max_open_t, max_seq_t, max_dset_t, max_close_t, max_inflate_t;
-    double min_open_t, min_seq_t, min_dset_t, min_close_t, min_inflate_t;
+    double all_t, open_t, read_seq_t, read_dset_t, close_t, inflate_t=0.0;
+    double max_t[6], min_t[6];
     MPI_File fh;
     MPI_Info info = MPI_INFO_NULL;
     NOvA_group *groups=NULL;
@@ -1739,6 +1796,7 @@ int main(int argc, char **argv) {
 
     MPI_Barrier(MPI_COMM_WORLD);
     open_t = MPI_Wtime();
+    all_t = open_t = MPI_Wtime();
 
     /* create file access property list and add MPI communicator */
     fapl_id = H5Pcreate(H5P_FILE_ACCESS); assert(fapl_id >= 0);
@@ -1773,7 +1831,7 @@ int main(int argc, char **argv) {
 
     /* calculate the range of event IDs responsible by all process and store
      * them in starts[nprocs] and ends[nprocs] */
-    calculate_starts_ends(fd, nprocs, rank, starts, ends, &nEvtIDs);
+    calculate_starts_ends(fd, nprocs, rank, groups+spill_grp, starts, ends, &nEvtIDs);
 
     /* set MPI-IO collective transfer mode */
     xfer_plist = H5Pcreate(H5P_DATASET_XFER); assert(xfer_plist>=0);
@@ -1847,19 +1905,20 @@ int main(int argc, char **argv) {
         assert(mpi_err == MPI_SUCCESS);
     }
     if (seq_opt == 4) close(posix_fd);
-    close_t = MPI_Wtime() - close_t;
+    double cur_t = MPI_Wtime();
+    close_t = cur_t - close_t;
+    all_t = cur_t - all_t;
 
     /* find the max/min timings among all processes */
-    MPI_Allreduce(&open_t,      &max_open_t,   1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    MPI_Allreduce(&read_seq_t,  &max_seq_t,    1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    MPI_Allreduce(&read_dset_t, &max_dset_t,   1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    MPI_Allreduce(&close_t,     &max_close_t,  1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    MPI_Allreduce(&inflate_t,   &max_inflate_t,1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    MPI_Allreduce(&open_t,      &min_open_t,   1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
-    MPI_Allreduce(&read_seq_t,  &min_seq_t,    1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
-    MPI_Allreduce(&read_dset_t, &min_dset_t,   1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
-    MPI_Allreduce(&close_t,     &min_close_t,  1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
-    MPI_Allreduce(&inflate_t,   &min_inflate_t,1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+    max_t[0] = min_t[0] = open_t;
+    max_t[1] = min_t[1] = read_seq_t;
+    max_t[2] = min_t[2] = read_dset_t;
+    max_t[3] = min_t[3] = close_t;
+    max_t[4] = min_t[4] = all_t;
+    max_t[5] = min_t[5] = inflate_t;
+    MPI_Allreduce(MPI_IN_PLACE, max_t, 6, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, min_t, 6, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+
     if (profile == 2) {
         for (g=0; g<nGroups; g++)
             MPI_Allreduce(MPI_IN_PLACE, groups[g].read_t, groups[g].nDatasets,
@@ -1871,14 +1930,12 @@ int main(int argc, char **argv) {
         printf("----------------------------------------------------\n");
 
         printf("MAX and MIN among all %d processes\n", nprocs);
-        printf("MAX open_time=%.2f read_seq_time=%.2f read_dset_t=%.2f close_time=%.2f\n",
-               max_open_t,max_seq_t,max_dset_t, max_close_t);
-        printf("MIN open_time=%.2f read_seq_time=%.2f read_dset_t=%.2f close_time=%.2f\n",
-               min_open_t,min_seq_t,min_dset_t, min_close_t);
-        if (dset_opt > 0) {
-            printf("MAX inflate_time=%.2f sec\n", max_inflate_t);
-            printf("MIN inflate_time=%.2f sec\n", min_inflate_t);
-        }
+        printf("MAX time: open=%.2f read evt.seq=%.2f read datasets=%.2f close=%.2f TOTAL=%.2f\n",
+               max_t[0],max_t[1],max_t[2],max_t[3],max_t[4]);
+        printf("MIN time: open=%.2f read evt.seq=%.2f read datasets=%.2f close=%.2f TOTAL=%.2f\n",
+               min_t[0],min_t[1],min_t[2],min_t[3],min_t[4]);
+        printf("MAX inflate_time=%.2f sec\n", max_t[5]);
+        printf("MIN inflate_time=%.2f sec\n", min_t[5]);
         printf("----------------------------------------------------\n");
     }
     fflush(stdout);
@@ -1894,6 +1951,11 @@ fn_exit:
             for (d=0; d<groups[g].nDatasets; d++)
                 free(groups[g].dset_names[d]);
             free(groups[g].dset_names);
+            free(groups[g].dims[0]);
+            free(groups[g].dims);
+            free(groups[g].chunk_dims[0]);
+            free(groups[g].chunk_dims);
+            free(groups[g].dtype_size);
             free(groups[g].nChunks);
             free(groups[g].buf);
             free(groups[g].read_t);
