@@ -249,12 +249,13 @@ static
 int calculate_starts_ends(hid_t    fd,
                           int      nprocs,
                           int      rank,
-                          hsize_t *starts,      /* OUT */
-                          hsize_t *ends)        /* OUT */
+                          hsize_t *starts,  /* OUT */
+                          hsize_t *ends,    /* OUT */
+                          hsize_t *nEvts)   /* OUT */
 {
     herr_t err;
     hid_t seq, fspace;
-    hsize_t j, ndims, dims[5], seq_len, my_count;
+    hsize_t j, ndims, dims[5], my_count;
 
     /* open dataset '/spill/evt.seq' */
     seq = H5Dopen2(fd, "/spill/evt.seq", H5P_DEFAULT); assert(seq >= 0);
@@ -266,21 +267,21 @@ int calculate_starts_ends(hid_t    fd,
     /* 2nd dimension of /spill/evt.seq is always 1 */
     assert(dims[1] == 1);
 
-    seq_len = dims[0];
+    *nEvts = dims[0];
     if (verbose && rank == 0)
-        printf("Size of /spill/evt.seq is %zd\n", (size_t)seq_len);
+        printf("Size of /spill/evt.seq is %zd\n", (size_t)(*nEvts));
 
     /* calculate the range of event IDs assigned to all processes. For process
      * of rank 'rank', its responsible range is from starts[rank] to
      * ends[rank].
      */
-    my_count = seq_len / nprocs;
-    for (j=0; j<seq_len % nprocs; j++) {
+    my_count = (*nEvts) / nprocs;
+    for (j=0; j<(*nEvts) % nprocs; j++) {
         starts[j] = my_count * j + j;
         ends[j] = starts[j] + my_count;
     }
     for (; j<nprocs; j++) {
-        starts[j] = my_count * j + seq_len % nprocs;
+        starts[j] = my_count * j + (*nEvts) % nprocs;
         ends[j] = starts[j] + my_count - 1;
     }
 
@@ -291,13 +292,13 @@ int calculate_starts_ends(hid_t    fd,
          */
         int64_t v, *seq_buf;
         printf("%d: /spill/evt.seq len=%zd starts[rank]=%zd ends[rank]=%zd\n",
-               rank, (size_t)seq_len, (size_t)starts[rank], (size_t)ends[rank]);
-        seq_buf = (int64_t*) malloc(seq_len * sizeof(int64_t));
+               rank, (size_t)(*nEvts), (size_t)starts[rank], (size_t)ends[rank]);
+        seq_buf = (int64_t*) malloc((*nEvts) * sizeof(int64_t));
 
         err = H5Dread(seq, H5T_STD_I64LE, fspace, fspace, H5P_DEFAULT, seq_buf);
         assert(err >= 0);
 
-        for (v=0; v<seq_len; v++)
+        for (v=0; v<(*nEvts); v++)
             if (seq_buf[v] != v) {
                 printf("Error: /spill/evt.seq[%"PRId64"] expect %"PRId64" but got %"PRId64"\n",
                        v, v, seq_buf[v]);
@@ -308,11 +309,6 @@ int calculate_starts_ends(hid_t    fd,
 
     err = H5Sclose(fspace); assert(err >= 0);
     err = H5Dclose(seq); assert(err >= 0);
-
-    if (rank == 0) {
-        printf("Number of unique evt IDs (size of /spill/evt.seq) = %zd\n",(size_t)seq_len);
-        printf("----------------------------------------------------\n");
-    }
 
     return 1;
 }
@@ -1652,7 +1648,7 @@ usage(char *progname)
 /*----< main() >-------------------------------------------------------------*/
 int main(int argc, char **argv) {
     hid_t   fd, fapl_id, xfer_plist;
-    hsize_t *starts=NULL, *ends;
+    hsize_t *starts=NULL, *ends, nEvtIDs;
     herr_t  err;
 
     int seq_opt=0, dset_opt=0, profile=0, spill_grp, posix_fd;
@@ -1777,7 +1773,7 @@ int main(int argc, char **argv) {
 
     /* calculate the range of event IDs responsible by all process and store
      * them in starts[nprocs] and ends[nprocs] */
-    calculate_starts_ends(fd, nprocs, rank, starts, ends);
+    calculate_starts_ends(fd, nprocs, rank, starts, ends, &nEvtIDs);
 
     /* set MPI-IO collective transfer mode */
     xfer_plist = H5Pcreate(H5P_DATASET_XFER); assert(xfer_plist>=0);
@@ -1871,6 +1867,9 @@ int main(int argc, char **argv) {
     }
 
     if (rank == 0) {
+        printf("Number of unique evt IDs (size of /spill/evt.seq) = %zd\n",(size_t)nEvtIDs);
+        printf("----------------------------------------------------\n");
+
         printf("MAX and MIN among all %d processes\n", nprocs);
         printf("MAX open_time=%.2f read_seq_time=%.2f read_dset_t=%.2f close_time=%.2f\n",
                max_open_t,max_seq_t,max_dset_t, max_close_t);
