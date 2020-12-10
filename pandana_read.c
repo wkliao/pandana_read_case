@@ -58,7 +58,7 @@ int read_dataset_names(int          rank,
 {
     FILE *fptr;
     int d, j, g, len, nGroups, nDatasets, nDsetGrp, maxDsetGrp;
-    char line[LINE_SIZE], gname[LINE_SIZE], *cur_gname;
+    char line[LINE_SIZE], gname[LINE_SIZE], name[LINE_SIZE], *cur_gname;
 
     *spill_grp = -1;
     fptr = fopen(listfile, "r");
@@ -104,8 +104,6 @@ int read_dataset_names(int          rank,
     nDatasets = 0;
     gname[0] = '\0';
     while (fgets(line, LINE_SIZE, fptr) != NULL) {
-        char name[LINE_SIZE];
-
         if (line[0] == '\n') continue;   /* skip empty line */
         if (line[0] == '#') continue;    /* skip comment line */
         len = strlen(line);
@@ -149,11 +147,20 @@ int read_dataset_names(int          rank,
     nGroups++;
     assert(*spill_grp >= 0);
 
-    if (debug && rank == 0) {
+    if (rank == 0) {
         for (g=0; g<nGroups; g++)
-            for (d=0; d<(*gList)[g].nDatasets; d++)
-                printf("nGroups=%d group[%d] nDatasets=%d name[%d] %s\n",
-                       nGroups, g, (*gList)[g].nDatasets, d, (*gList)[g].dset_names[d]);
+            /* check if the first dataset of each group is evt.seq */
+            strcpy(name, (*gList)[g].dset_names[0]);
+            strtok(name, "/");
+            if (strcmp(strtok(NULL, "/"), "evt.seq")) {
+                printf("Error: group[g=%d] %s contains no evt.seq\n",g, name);
+                assert(0);
+            }
+            if (debug) {
+                for (d=0; d<(*gList)[g].nDatasets; d++)
+                    printf("nGroups=%d group[%d] nDatasets=%d name[%d] %s\n",
+                           nGroups, g, (*gList)[g].nDatasets, d, (*gList)[g].dset_names[d]);
+            }
     }
 
     *nTotalDatasets = 0;
