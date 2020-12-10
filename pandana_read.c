@@ -95,6 +95,7 @@ int read_dataset_names(int          rank,
 
     /* allocate an array of group objects */
     *gList = (NOvA_group*) malloc(nGroups * sizeof(NOvA_group));
+    assert(*gList != NULL);
 
     /* rewind the file, this time read the dataset names */
     rewind(fptr);
@@ -125,6 +126,7 @@ int read_dataset_names(int          rank,
             if (!strcmp(gname, "spill")) *spill_grp = nGroups;
             /* allocate space to store names of datasets in this group */
             (*gList)[nGroups].dset_names = (char**) malloc(maxDsetGrp * sizeof(char*));
+            assert((*gList)[nGroups].dset_names != NULL);
         }
 
         if (!strcmp(strtok(NULL, "/"), "evt.seq")) {
@@ -132,10 +134,12 @@ int read_dataset_names(int          rank,
             for (j=nDatasets; j>0; j--)
                 (*gList)[nGroups].dset_names[j] = (*gList)[nGroups].dset_names[j-1];
             (*gList)[nGroups].dset_names[0] = (char*) malloc(len + 1);
+            assert((*gList)[nGroups].dset_names[0] != NULL);
             strcpy((*gList)[nGroups].dset_names[0], line);
         }
         else {
             (*gList)[nGroups].dset_names[nDatasets] = (char*) malloc(len + 1);
+            assert((*gList)[nGroups].dset_names[nDatasets] != NULL);
             strcpy((*gList)[nGroups].dset_names[nDatasets], line);
         }
         nDatasets++;
@@ -145,6 +149,13 @@ int read_dataset_names(int          rank,
     nGroups++;
     assert(*spill_grp >= 0);
 
+    if (debug && rank == 0) {
+        for (g=0; g<nGroups; g++)
+            for (d=0; d<(*gList)[g].nDatasets; d++)
+                printf("nGroups=%d group[%d] nDatasets=%d name[%d] %s\n",
+                       nGroups, g, (*gList)[g].nDatasets, d, (*gList)[g].dset_names[d]);
+    }
+
     *nTotalDatasets = 0;
     for (g=0; g<nGroups; g++) {
         nDatasets = (*gList)[g].nDatasets;
@@ -152,33 +163,35 @@ int read_dataset_names(int          rank,
         *nTotalDatasets += nDatasets;
         /* allocate array of read buffer pointers */
         (*gList)[g].buf = (void**) malloc(nDatasets * sizeof(void*));
+        assert((*gList)[g].buf != NULL);
 
         /* allocate space to store data type sizes */
         (*gList)[g].dtype_size = (size_t*) calloc(nDatasets, sizeof(size_t));
+        assert((*gList)[g].dtype_size != NULL);
 
         /* allocate space to store dimension sizes */
         (*gList)[g].dims = (hsize_t**) malloc(nDatasets * sizeof(hsize_t*));
+        assert((*gList)[g].dims != NULL);
         (*gList)[g].dims[0] = (hsize_t*) malloc(nDatasets * 2 * sizeof(hsize_t*));
+        assert((*gList)[g].dims[0] != NULL);
         for (j=1; j<nDatasets; j++)
             (*gList)[g].dims[j] = (*gList)[g].dims[j-1] + 2;
 
         /* allocate space to store chunk dimension sizes */
         (*gList)[g].chunk_dims = (hsize_t**) malloc(nDatasets * sizeof(hsize_t*));
+        assert((*gList)[g].chunk_dims != NULL);
         (*gList)[g].chunk_dims[0] = (hsize_t*) malloc(nDatasets * 2 * sizeof(hsize_t*));
+        assert((*gList)[g].chunk_dims[0] != NULL);
         for (j=1; j<nDatasets; j++)
             (*gList)[g].chunk_dims[j] = (*gList)[g].chunk_dims[j-1] + 2;
 
         /* allocate space to store number of chunks and initialize to zeros */
         (*gList)[g].nChunks = (size_t*) calloc(nDatasets, sizeof(size_t));
+        assert((*gList)[g].nChunks != NULL);
 
         /* allocate space to store read timings */
         (*gList)[g].read_t = (double*) calloc(nDatasets, sizeof(double));
-    }
-
-    if (debug && rank == 0) {
-        for (g=0; g<nGroups; g++)
-            for (d=0; d<(*gList)[g].nDatasets; d++)
-                printf("group[%d].dataset[%d] %s\n", g, d, (*gList)[g].dset_names[d]);
+        assert((*gList)[g].read_t != NULL);
     }
 
     if (rank == 0) {
@@ -337,6 +350,7 @@ int calculate_starts_ends(hid_t       fd,
         printf("%d: /spill/evt.seq len=%zd starts[rank]=%zd ends[rank]=%zd\n",
                rank, (size_t)(*nEvts), (size_t)starts[rank], (size_t)ends[rank]);
         seq_buf = (int64_t*) malloc((*nEvts) * sizeof(int64_t));
+        assert(seq_buf != NULL);
 
         err = H5Dread(seq, H5T_STD_I64LE, fspace, fspace, H5P_DEFAULT, seq_buf);
         assert(err >= 0);
@@ -440,6 +454,7 @@ int read_dataset_posix(hid_t       fd,
     group->dtype_size[dset_idx] = dtype_size;
     err = H5Tclose(dtype); assert(err >= 0);
     group->buf[dset_idx] = (void*) malloc(dims[0] * dtype_size);
+    assert(group->buf[dset_idx] != NULL);
 
     /* find the number of chunks to be read by this process */
     group->nChunks[dset_idx] = dims[0] / chunk_dims[0];
@@ -449,6 +464,7 @@ int read_dataset_posix(hid_t       fd,
     size_t chunk_size = chunk_dims[0] * dtype_size;
     unsigned char *chunk_buf;
     chunk_buf = (unsigned char*) malloc(chunk_size);
+    assert(chunk_buf != NULL);
 
     /* the last chunk may be of size less than chunk_dims[0] */
     size_t last_chunk_len = dims[0] % chunk_dims[0];
@@ -539,7 +555,9 @@ int read_evt_seq_aggr_all(hid_t           fd,
 
     /* save file offsets and sizes of individual chunks for later use */
     addr = (haddr_t**) malloc(nGroups * sizeof(haddr_t*));
+    assert(addr != NULL);
     size = (hsize_t**) malloc(nGroups * sizeof(hsize_t*));
+    assert(size != NULL);
 
     /* collect sizes of dimensions and chunk dimensions of evt.seq datasets in
      * all groups. Also inquire number of chunks and their file offsets and
@@ -576,6 +594,7 @@ int read_evt_seq_aggr_all(hid_t           fd,
         groups[g].dtype_size[0] = dtype_size;
         err = H5Tclose(dtype); assert(err >= 0);
         groups[g].buf[0] = (void*) malloc(dims[0] * dtype_size);
+        assert(groups[g].buf[0] != NULL);
 
         /* find the number of chunks to be read by this process */
         groups[g].nChunks[0] = dims[0] / chunk_dims[0];
@@ -586,7 +605,9 @@ int read_evt_seq_aggr_all(hid_t           fd,
 
         /* collect offsets and sizes of individual chunks of evt.seq */
         addr[g] = (haddr_t*) malloc(groups[g].nChunks[0] * sizeof(haddr_t));
+        assert(addr[g] != NULL);
         size[g] = (hsize_t*) malloc(groups[g].nChunks[0] * sizeof(hsize_t));
+        assert(size[g] != NULL);
         offset[0] = 0;
         for (j=0; j<groups[g].nChunks[0]; j++) {
             err = H5Dget_chunk_info_by_coord(seq, offset, NULL, &addr[g][j], &size[g][j]); assert(err>=0);
@@ -602,6 +623,7 @@ int read_evt_seq_aggr_all(hid_t           fd,
      * displacement-length-index objects for such sorting.
      */
     off_len *disp_indx = (off_len*) malloc(nChunks * sizeof(off_len));
+    assert(disp_indx != NULL);
 
     int is_mono_nondecr = 1;
     k = 0;
@@ -634,7 +656,9 @@ int read_evt_seq_aggr_all(hid_t           fd,
 
     /* allocate array_of_blocklengths[] and array_of_displacements[] */
     MPI_Aint *chunk_dsps = (MPI_Aint*) malloc(nChunks * sizeof(MPI_Aint));
+    assert(chunk_dsps != NULL);
     int *chunk_lens = (int*) malloc(nChunks * sizeof(int));
+    assert(chunk_lens != NULL);
     for (j=0; j<nChunks; j++) {
         chunk_lens[j] = disp_indx[j].block_len;
         chunk_dsps[j] = disp_indx[j].block_dsp;
@@ -660,6 +684,7 @@ int read_evt_seq_aggr_all(hid_t           fd,
     /* allocate a buffer for reading the compressed chunks all at once */
     unsigned char *chunk_buf, *chunk_buf_ptr;
     chunk_buf = (unsigned char*) malloc(read_len);
+    assert(chunk_buf != NULL);
     chunk_buf_ptr = chunk_buf;
 
     /* collective read */
@@ -670,6 +695,7 @@ int read_evt_seq_aggr_all(hid_t           fd,
     double timing = MPI_Wtime();
     size_t whole_chunk_size = max_chunk_dim * dtype_size;
     unsigned char *whole_chunk = (unsigned char*) malloc(whole_chunk_size);
+    assert(whole_chunk != NULL);
     for (j=0; j<nChunks; j++) {
         int ret;
         z_stream z_strm;
@@ -769,7 +795,9 @@ int read_evt_seq(hid_t          fd,
 
         if (my_nGroups > 0) {
             bounds = (long long**) malloc(my_nGroups * sizeof(long long*));
+            assert(bounds != NULL);
             bounds[0] = (long long*) malloc(my_nGroups * nprocs * 2 * sizeof(long long));
+            assert(bounds[0] != NULL);
             for (g=1; g<my_nGroups; g++)
                 bounds[g] = bounds[g-1] + nprocs * 2;
         }
@@ -813,8 +841,10 @@ int read_evt_seq(hid_t          fd,
         /* Use POSIX read to read individual chunks, decompress them, and
          * scatter boundaries
          */
-        if (rank == 0)
+        if (rank == 0) {
             bounds = (long long*) malloc(nprocs * 2 * sizeof(long long));
+            assert(bounds != NULL);
+        }
 
         for (g=0; g<nGroups; g++) {
             /* read dataset evt.seq, the first dataset in the group, and calculate
@@ -846,8 +876,10 @@ int read_evt_seq(hid_t          fd,
     }
 
     /* seq_opt == 0, 1, or 2 */
-    if (seq_opt == 2 && rank == 0)
+    if (seq_opt == 2 && rank == 0) {
         bounds = (long long*) malloc(nprocs * 2 * sizeof(long long));
+        assert(bounds != NULL);
+    }
 
     for (g=0; g<nGroups; g++) {
         /* read dataset evt.seq, the first dataset in the group, and calculate
@@ -891,6 +923,7 @@ int read_evt_seq(hid_t          fd,
              */
             if (rank == 0) {
                 seq_buf = (int64_t*) malloc(dims[0] * dims[1] * dtype_size);
+                assert(seq_buf != NULL);
                 if (profile == 2) groups[g].read_t[0]=MPI_Wtime();
                 err = H5Dread(seq, H5T_STD_I64LE, H5S_ALL, H5S_ALL, H5P_DEFAULT, seq_buf);
                 assert(err >= 0);
@@ -909,6 +942,7 @@ int read_evt_seq(hid_t          fd,
             if (seq_opt == 0) {
                 /* rank 0 reads evt.seq and broadcasts it */
                 seq_buf = (int64_t*) malloc(dims[0] * dims[1] * dtype_size);
+                assert(seq_buf != NULL);
                 if (rank == 0) {
                     if (profile == 2) groups[g].read_t[0]=MPI_Wtime();
                     err = H5Dread(seq, H5T_STD_I64LE, H5S_ALL, H5S_ALL, H5P_DEFAULT,
@@ -920,6 +954,7 @@ int read_evt_seq(hid_t          fd,
             else {
                 /* collective-read-the-whole-dataset is bad */
                 seq_buf = (int64_t*) malloc(dims[0] * dims[1] * dtype_size);
+                assert(seq_buf != NULL);
                 if (profile == 2) groups[g].read_t[0]=MPI_Wtime();
                 err = H5Dread(seq, H5T_STD_I64LE, H5S_ALL, H5S_ALL, xfer_plist, seq_buf);
                 /* all-processes-read-the-whole-dataset is even worse */
@@ -1009,6 +1044,7 @@ int read_hdf5(hid_t       fd,
         /* calculate read size in bytes and allocate read buffers */
         read_len = count[0] * count[1] * group->dtype_size[d];
         group->buf[d] = (void*) malloc(read_len);
+        assert(group->buf[d] != NULL);
 
         /* collectively read dataset d's contents */
         if (verbose)
@@ -1081,6 +1117,7 @@ int read_mpio(hid_t       fd,
         /* calculate buffer read size in bytes and allocate read buffer */
         read_len = (high - low + 1) * dims[1] * dtype_size;
         group->buf[d] = (void*) malloc(read_len);
+        assert(group->buf[d] != NULL);
 
         hsize_t nChunks, offset[2];
 
@@ -1093,6 +1130,7 @@ int read_mpio(hid_t       fd,
          * sorting.
          */
         off_len *disp_indx = (off_len*) malloc(nChunks * sizeof(off_len));
+        assert(disp_indx != NULL);
 
         /* calculate the logical position of chunk's first element. See
          * https://hdf5.io/develop/group___h5_d.html#ga408a49c6ec59c5b65ce4c791f8d26cb0
@@ -1127,7 +1165,9 @@ int read_mpio(hid_t       fd,
 
         /* allocate array_of_blocklengths[] and array_of_displacements[] */
         MPI_Aint *chunk_dsps = (MPI_Aint*) malloc(nChunks * sizeof(MPI_Aint));
+        assert(chunk_dsps != NULL);
         int *chunk_lens = (int*) malloc(nChunks * sizeof(int));
+        assert(chunk_lens != NULL);
         for (j=0; j<nChunks; j++) {
             chunk_lens[j] = disp_indx[j].block_len;
             chunk_dsps[j] = disp_indx[j].block_dsp;
@@ -1153,6 +1193,7 @@ int read_mpio(hid_t       fd,
         /* allocate buffer for reading the compressed chunks all at once */
         unsigned char *chunk_buf, *chunk_buf_ptr;
         chunk_buf = (unsigned char*) malloc(read_len);
+        assert(chunk_buf != NULL);
         chunk_buf_ptr = chunk_buf;
 
         /* collective read */
@@ -1165,6 +1206,7 @@ int read_mpio(hid_t       fd,
         timing = MPI_Wtime();
         size_t whole_chunk_size = chunk_dims[0] * chunk_dims[1] * dtype_size;
         whole_chunk = (unsigned char*) malloc(whole_chunk_size);
+        assert(whole_chunk != NULL);
         for (j=0; j<nChunks; j++) {
             int ret;
             z_stream z_strm;
@@ -1240,7 +1282,9 @@ int read_mpio_aggr(hid_t       fd,
 
     /* allocate space to save file offsets and sizes of individual chunks */
     addr = (haddr_t**) malloc(group->nDatasets * sizeof(haddr_t*));
+    assert(addr != NULL);
     size = (hsize_t**) malloc(group->nDatasets * sizeof(hsize_t*));
+    assert(size != NULL);
 
     /* collect metadata of all chunks of all datasets in group g, including
      * number of chunks and their file offsets and compressed sizes
@@ -1275,6 +1319,7 @@ int read_mpio_aggr(hid_t       fd,
 
         /* calculate buffer read size in bytes and allocate read buffer */
         group->buf[d] = (void*) malloc((high - low + 1) * dims[1] * dtype_size[d]);
+        assert(group->buf[d] != NULL);
 
         /* find the number of chunks to be read by this process */
         group->nChunks[d] = (high / chunk_dims[0]) - (low / chunk_dims[0]) + 1;
@@ -1282,7 +1327,9 @@ int read_mpio_aggr(hid_t       fd,
 
         /* collect offsets of all chunks of this dataset */
         addr[d] = (haddr_t*) malloc(group->nChunks[d] * sizeof(haddr_t));
+        assert(addr[d] != NULL);
         size[d] = (hsize_t*) malloc(group->nChunks[d] * sizeof(hsize_t));
+        assert(size[d] != NULL);
         hsize_t offset[2]={0, 0};
         for (j=0; j<group->nChunks[d]; j++) {
             err = H5Dget_chunk_info_by_coord(dset, offset, NULL, &addr[d][j], &size[d][j]); assert(err>=0);
@@ -1298,6 +1345,7 @@ int read_mpio_aggr(hid_t       fd,
      * sorting.
      */
     off_len *disp_indx = (off_len*) malloc(nChunks * sizeof(off_len));
+    assert(disp_indx != NULL);
 
     int is_mono_nondecr = 1;
     k = 0;
@@ -1329,7 +1377,9 @@ int read_mpio_aggr(hid_t       fd,
 
     /* allocate array_of_blocklengths[] and array_of_displacements[] */
     MPI_Aint *chunk_dsps = (MPI_Aint*) malloc(nChunks * sizeof(MPI_Aint));
+    assert(chunk_dsps != NULL);
     int *chunk_lens = (int*) malloc(nChunks * sizeof(int));
+    assert(chunk_lens != NULL);
     for (j=0; j<nChunks; j++) {
         chunk_lens[j] = disp_indx[j].block_len;
         chunk_dsps[j] = disp_indx[j].block_dsp;
@@ -1355,6 +1405,7 @@ int read_mpio_aggr(hid_t       fd,
     /* allocate buffer for reading the compressed chunks all at once */
     unsigned char *chunk_buf, *chunk_buf_ptr;
     chunk_buf = (unsigned char*) malloc(read_len);
+    assert(chunk_buf != NULL);
     chunk_buf_ptr = chunk_buf;
 
     /* collective read */
@@ -1364,6 +1415,7 @@ int read_mpio_aggr(hid_t       fd,
     /* decompress individual chunks into group->buf[d] */
     double timing = MPI_Wtime();
     unsigned char *whole_chunk = (unsigned char*) malloc(max_chunk_size);
+    assert(whole_chunk != NULL);
     for (j=0; j<nChunks; j++) {
         int ret;
         z_stream z_strm;
@@ -1445,8 +1497,10 @@ int chunk_statistics(MPI_Comm    comm,
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 
-    if (rank == 0)
+    if (rank == 0) {
         bounds = (long long*) malloc(nprocs * 2 * sizeof(long long));
+        assert(bounds != NULL);
+    }
 
     /* collect statistics describing chunk contention */
     fd = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
@@ -1522,6 +1576,7 @@ int chunk_statistics(MPI_Comm    comm,
                 }
 
                 seq_buf = (int64_t*) malloc(dims[0] * dims[1] * dtype_size);
+                assert(seq_buf != NULL);
                 err = H5Dread(seq, H5T_STD_I64LE, H5S_ALL, H5S_ALL, H5P_DEFAULT, seq_buf); assert(err >= 0);
 
                 for (j=0, k=0; j<nprocs; j++) {
@@ -1793,6 +1848,7 @@ int main(int argc, char **argv) {
      * are responsible by process rank
      */
     starts = (hsize_t*) malloc(nprocs * 2 * sizeof(hsize_t));
+    assert(starts != NULL);
     ends = starts + nprocs;
 
     MPI_Barrier(MPI_COMM_WORLD);
@@ -1841,6 +1897,7 @@ int main(int argc, char **argv) {
     /* calculate this process's array index range (lower and upper) for each
      * group */
     lowers = (size_t*) malloc(nGroups * 2 * sizeof(size_t));
+    assert(lowers != NULL);
     uppers = lowers + nGroups;
 
     /* iterate all groups to calculate lowers[] and uppers[] */
@@ -1853,6 +1910,7 @@ int main(int argc, char **argv) {
         int test_seq_opt = (seq_opt == 0) ? 1 : 0;
         size_t *debug_lowers, *debug_uppers;
         debug_lowers = (size_t*) malloc(nGroups * 2 * sizeof(size_t));
+        assert(debug_lowers != NULL);
         debug_uppers = debug_lowers + nGroups;
         read_evt_seq(fd, fh, posix_fd, groups, nGroups, nprocs, rank, profile,
                      test_seq_opt, xfer_plist, spill_grp, starts, ends,
