@@ -432,7 +432,7 @@ int read_dataset_posix(hid_t       fd,
     hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
     int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
     assert(chunk_ndims == 2);
-    assert(chunk_dims[1] == 1);
+    assert(chunk_dims[1] == dims[1]);
     err = H5Pclose(chunk_plist); assert(err>=0);
 
     hid_t dtype = H5Dget_type(dset); assert(dtype >= 0);
@@ -990,7 +990,7 @@ int read_hdf5(hid_t       fd,
         hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
         int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
         assert(chunk_ndims == 2);
-        assert(chunk_dims[1] == 1);
+        assert(chunk_dims[1] == dims[1]);
         err = H5Pclose(chunk_plist); assert(err>=0);
 
         /* set subarray/hyperslab access */
@@ -1069,7 +1069,7 @@ int read_mpio(hid_t       fd,
         hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
         int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
         assert(chunk_ndims == 2);
-        assert(chunk_dims[1] == 1);
+        assert(chunk_dims[1] == dims[1]);
         err = H5Pclose(chunk_plist); assert(err>=0);
 
         /* get data type and size */
@@ -1264,7 +1264,7 @@ int read_mpio_aggr(hid_t       fd,
         hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
         int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
         assert(chunk_ndims == 2);
-        assert(chunk_dims[1] == 1);
+        assert(chunk_dims[1] == dims[1]);
         err = H5Pclose(chunk_plist); assert(err>=0);
 
         /* get data type and size */
