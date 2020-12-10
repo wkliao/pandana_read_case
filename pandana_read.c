@@ -27,7 +27,7 @@
 #define MIN(x,y) (((x) < (y)) ? (x) : (y))
 #endif
 
-#define LINE_SIZE 64
+#define LINE_SIZE 256
 
 static int verbose, debug;
 
@@ -91,6 +91,7 @@ int read_dataset_names(int          rank,
         }
         nDsetGrp++;
     }
+    if (nDsetGrp > maxDsetGrp) maxDsetGrp = nDsetGrp;
 
     /* allocate an array of group objects */
     *gList = (NOvA_group*) malloc(nGroups * sizeof(NOvA_group));
