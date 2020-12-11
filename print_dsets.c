@@ -23,6 +23,7 @@
 
 struct op_data {
     int     non_zero_only;
+    int     spill_grp;
     hsize_t upper_bound;
     herr_t  err;
 };
@@ -51,6 +52,7 @@ herr_t count_size(hid_t             loc_id,        /* object ID */
             nGroups = 0;
             return 0;
         }
+        if (!strcmp(name, "spill")) it_op->spill_grp = nGroups;
 
         grp_names[nGroups] = (char*) malloc(strlen(name) + 1);
         strcpy(grp_names[nGroups], name);
@@ -149,7 +151,7 @@ int main(int argc, char **argv)
     H5G_info_t grp_info;
     struct op_data it_op;
 
-    debug = 0;
+    debug = 1;
     upper_bound = 64; /* default 64 MiB */
 
     if (argc < 2 || argc > 3) {
@@ -159,6 +161,7 @@ int main(int argc, char **argv)
     if (argc == 3) upper_bound = atoi(argv[2]);
     it_op.upper_bound = 1048576 * upper_bound;
     it_op.non_zero_only = 1;
+    it_op.spill_grp = 0;
 
     /* open input file in read-only mode */
     fd_in = H5Fopen(argv[1], H5F_ACC_RDONLY, H5P_DEFAULT);
@@ -173,15 +176,28 @@ int main(int argc, char **argv)
     numZeroGrp = 0;
     numLargeGrp = 0;
     /* Iterate all objects and count the accumulated dataset sizes of each group */
+#define HAS_H5OVISIT3 1
+#if defined HAS_H5OVISIT3 && HAS_H5OVISIT3
     err = H5Ovisit3(fd_in, H5_INDEX_CRT_ORDER, H5_ITER_NATIVE, count_size, &it_op, H5O_INFO_ALL);
     if (err < 0) HANDLE_ERROR("H5Ovisit3", argv[1])
+    if (it_op.err < 0) HANDLE_ERROR("H5Ovisit3", argv[1])
+#else
+    err = H5Ovisit(fd_in, H5_INDEX_CRT_ORDER, H5_ITER_NATIVE, count_size, &it_op);
+    if (err < 0) HANDLE_ERROR("H5Ovisit", argv[1])
     if (it_op.err < 0) HANDLE_ERROR("H5Ovisit", argv[1])
+#endif
     assert(nGroups == grp_info.nlinks);
 
     /* Iterate all objects and print dataset names */
+#if defined HAS_H5OVISIT3 && HAS_H5OVISIT3
     err = H5Ovisit3(fd_in, H5_INDEX_CRT_ORDER, H5_ITER_NATIVE, print_names, &it_op, H5O_INFO_ALL);
     if (err < 0) HANDLE_ERROR("H5Ovisit3", argv[1])
+    if (it_op.err < 0) HANDLE_ERROR("H5Ovisit3", argv[1])
+#else
+    err = H5Ovisit(fd_in, H5_INDEX_CRT_ORDER, H5_ITER_NATIVE, print_names, &it_op);
+    if (err < 0) HANDLE_ERROR("H5Ovisit", argv[1])
     if (it_op.err < 0) HANDLE_ERROR("H5Ovisit", argv[1])
+#endif
 
     if (debug) {
         printf("number of groups           = %zd\n", nGroups);
@@ -189,6 +205,8 @@ int main(int argc, char **argv)
         printf("number of large groups     = %d\n", numLargeGrp);
         printf("number of groups size < %d MiB = %d\n",
                upper_bound,nGroups-numZeroGrp-numLargeGrp);
+        printf("size of spill group[%d] = %d (%d MiB)\n", it_op.spill_grp,
+               grp_size[it_op.spill_grp], grp_size[it_op.spill_grp]/1048576);
     }
 
     for (i=0; i<nGroups; i++) free(grp_names[i]);
