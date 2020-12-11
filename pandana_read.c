@@ -1710,8 +1710,8 @@ int chunk_statistics(MPI_Comm    comm,
                nDatasets, total_nchunks);
         printf("Aggregate number of chunks read by all processes: %lld\n",
                aggr_nchunks_read);
-        printf("        averaged among processes: %.2f\n", (float)aggr_nchunks_read/nprocs);
-        printf("        averaged among processes among datasets: %.2f\n", (float)aggr_nchunks_read/nprocs/nDatasets);
+        printf("        averaged per process: %.2f\n", (float)aggr_nchunks_read/nprocs);
+        printf("        averaged per process per dataset: %.2f\n", (float)aggr_nchunks_read/nprocs/nDatasets);
         printf("Out of %d chunks, number of chunks read by two or more processes: %d\n",
                total_nchunks,nchunks_shared);
         printf("Out of %d chunks, most shared chunk is read by number of processes: %d\n",
@@ -2007,7 +2007,8 @@ int main(int argc, char **argv) {
     fflush(stdout);
     MPI_Barrier(MPI_COMM_WORLD);
 
-    chunk_statistics(MPI_COMM_WORLD, infile, groups, nGroups, starts, ends, seq_opt, profile, spill_grp);
+    if (profile > 0)
+        chunk_statistics(MPI_COMM_WORLD, infile, groups, nGroups, starts, ends, seq_opt, profile, spill_grp);
 
 fn_exit:
     if (starts != NULL) free(starts);
