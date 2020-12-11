@@ -24,6 +24,7 @@
 struct op_data {
     int     non_zero_only;
     int     spill_grp;
+    int     print_spill_grp;
     hsize_t upper_bound;
     herr_t  err;
 };
@@ -130,7 +131,10 @@ herr_t print_names(hid_t             loc_id,        /* object ID */
         free(gname);
 
         if (it_op->non_zero_only) {
-            if (grp_size[nGroups-1] > 0 && grp_size[nGroups-1] < it_op->upper_bound)
+            if (!it_op->print_spill_grp && !strcmp(name, "spill/evt.seq"))
+                /* if spill group is too big, print only /spill/evt.seq */
+                printf("/%s\n",name);
+            else if (grp_size[nGroups-1] > 0 && grp_size[nGroups-1] < it_op->upper_bound)
                 printf("/%s\n",name);
         }
         else
@@ -151,7 +155,7 @@ int main(int argc, char **argv)
     H5G_info_t grp_info;
     struct op_data it_op;
 
-    debug = 1;
+    debug = 0;
     upper_bound = 64; /* default 64 MiB */
 
     if (argc < 2 || argc > 3) {
@@ -162,6 +166,7 @@ int main(int argc, char **argv)
     it_op.upper_bound = 1048576 * upper_bound;
     it_op.non_zero_only = 1;
     it_op.spill_grp = 0;
+    it_op.print_spill_grp = 1;
 
     /* open input file in read-only mode */
     fd_in = H5Fopen(argv[1], H5F_ACC_RDONLY, H5P_DEFAULT);
@@ -187,6 +192,9 @@ int main(int argc, char **argv)
     if (it_op.err < 0) HANDLE_ERROR("H5Ovisit", argv[1])
 #endif
     assert(nGroups == grp_info.nlinks);
+
+    if (grp_size[it_op.spill_grp] >= it_op.upper_bound)
+        it_op.print_spill_grp = 0;
 
     /* Iterate all objects and print dataset names */
 #if defined HAS_H5OVISIT3 && HAS_H5OVISIT3
