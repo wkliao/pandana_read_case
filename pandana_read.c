@@ -821,14 +821,14 @@ int read_evt_seq(hid_t          fd,
         if (rem) count++;
         rem *= count;
         for (g=0,j=0; g<nGroups; g++,j++) {
+            if (g > 0) { /* check if need to increment root */
+                if (g == rem) { j -= rem; count--; }
+                if (j % count == 0) root++;
+            }
             if (g == spill_grp) { /* no need to read /spill/evt.seq */
                 lowers[g] = starts[rank];
                 uppers[g] = ends[rank];
                 continue;
-            }
-            if (g > 0) { /* check if need to increment root */
-                if (g == rem) { j -= rem; count--; }
-                if (j % count == 0) root++;
             }
             void *scatter_buf = (root == rank) ? bounds[g-my_startGrp] : NULL;
             MPI_Scatter(scatter_buf, 2, MPI_LONG_LONG, low_high, 2, MPI_LONG_LONG, root, MPI_COMM_WORLD);
