@@ -1500,11 +1500,15 @@ int chunk_statistics(MPI_Comm    comm,
     long long aggr_nchunks_read, my_nchunks_read=0;
     long long all_dset_size, all_evt_seq_size, all_dset_size_z, all_evt_seq_size_z;
     long long *bounds, maxRead=0, minRead=LONG_MAX;
+    size_t *grp_sizes, *grp_zip_sizes, *grp_nChunks;
 
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 
     if (rank == 0) {
+        grp_sizes = (size_t*) calloc(nGroups * 3, sizeof(size_t));
+        grp_zip_sizes = grp_sizes + nGroups;
+        grp_nChunks = grp_zip_sizes + nGroups;
         bounds = (long long*) malloc(nprocs * 2 * sizeof(long long));
         assert(bounds != NULL);
     }
@@ -1556,13 +1560,17 @@ int chunk_statistics(MPI_Comm    comm,
                 hid_t chunk_plist = H5Dget_create_plist(seq); assert(chunk_plist >= 0);
                 int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
                 assert(chunk_ndims == 2);
+                /* evt.seq chunk_dims[1] should always be 1 */
+                assert(chunk_dims[1] == 1);
                 err = H5Pclose(chunk_plist); assert(err>=0);
 
                 /* data type of evt.seq is 64-bit integer */
                 hid_t dtype = H5Dget_type(seq); assert(dtype >= 0);
                 size_t dtype_size = H5Tget_size(dtype); assert(dtype_size > 0);
                 err = H5Tclose(dtype); assert(err >= 0);
+
                 all_evt_seq_size += dims[0] * dims[1] * dtype_size;
+                grp_sizes[g] += dims[0] * dims[1] * dtype_size;
 
                 groups[g].nChunks[0] = dims[0] / chunk_dims[0];
                 if (dims[0] % chunk_dims[0]) groups[g].nChunks[0]++;
@@ -1571,6 +1579,7 @@ int chunk_statistics(MPI_Comm    comm,
 
                 my_nchunks_read += groups[g].nChunks[0];
                 total_nchunks += groups[g].nChunks[0];
+                grp_nChunks[g] += groups[g].nChunks[0];
 
                 /* calculate read sizes of compressed data */
                 hsize_t offset[2]={0, 0};
@@ -1580,6 +1589,7 @@ int chunk_statistics(MPI_Comm    comm,
                     err = H5Dget_chunk_info_by_coord(seq, offset, NULL, &addr, &size); assert(err>=0);
                     all_evt_seq_size_z += size;
                     offset[0] += chunk_dims[0];
+                    grp_zip_sizes[g] += size;
                 }
 
                 seq_buf = (int64_t*) malloc(dims[0] * dims[1] * dtype_size);
@@ -1625,6 +1635,8 @@ int chunk_statistics(MPI_Comm    comm,
             hid_t chunk_plist = H5Dget_create_plist(dset); assert(chunk_plist >= 0);
             int chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
             err = H5Pclose(chunk_plist); assert(err>=0);
+            /* Note chunk_dims[1] may be larger than 1, but dims[1] is not chunked */
+            assert(chunk_dims[1] == dims[1]);
 
             /* data type of evt.seq is 64-bit integer */
             hid_t dtype = H5Dget_type(dset); assert(dtype >= 0);
@@ -1672,6 +1684,8 @@ int chunk_statistics(MPI_Comm    comm,
                 }
                 max_shared_chunks = MAX(max_shared_chunks, max_chunks);
                 all_dset_size += dims[0] * dims[1] * dtype_size;
+                grp_sizes[g] += dims[0] * dims[1] * dtype_size;
+                grp_nChunks[g] += groups[g].nChunks[d];
 
                 /* calculate read sizes of compressed data */
                 hsize_t offset[2]={0, 0};
@@ -1681,6 +1695,7 @@ int chunk_statistics(MPI_Comm    comm,
                     err = H5Dget_chunk_info_by_coord(dset, offset, NULL, &addr, &size); assert(err>=0);
                     all_dset_size_z += size;
                     offset[0] += chunk_dims[0];
+                    grp_zip_sizes[g] += size;
                 }
             }
             err = H5Dclose(dset); assert(err >= 0);
@@ -1724,6 +1739,15 @@ int chunk_statistics(MPI_Comm    comm,
                     printf("dataset[%3d] nchunks: %4d read time: %.4f sec. (%s)\n",
                            j++, groups[g].nChunks[d], groups[g].read_t[d], groups[g].dset_names[d]);
         }
+        if (profile == 1) {
+            for (g=0; g<nGroups; g++) {
+                char *gname = strtok(groups[g].dset_names[0], "/");
+                printf("group %46s size %5zd MiB (zipped %4zd MiB) nChunks=%zd\n",
+                       gname,grp_sizes[g]/1048576, grp_zip_sizes[g]/1048576, grp_nChunks[g]);
+            }
+        }
+        free(grp_sizes);
+
         printf("\n\n");
     }
     fflush(stdout);
