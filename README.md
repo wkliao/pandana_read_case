@@ -45,31 +45,60 @@ all other datasets in the same group, to be read by all processes.
      possible to have repeated event IDs in consecutive elements.
 
 Parallel reads consist of the following steps.
-1. Read **'/G/evt.seq'** and calculate array index ranges for all processes. 
-   This can be done in 3 options.
-   * Option 1. Root process reads the entire '/G/evt.seq' and then broadcasts 
+1. Read **'evt.seq'** datasets in all groups and calculate array index ranges
+   (boundaries) responsible by individual process. This can be done in 5
+   options.
+   * Option 0. Root process reads the entire '/G/evt.seq' and then broadcasts 
      to the remaining processes. All processes use the contents of
      '/G/evt.seq' to calculate their responsible index ranges. 
-   * Option 2. All processes collectively read the whole '/G/evt.seq'. All
+   * Option 1. All processes collectively read the whole '/G/evt.seq'. All
      processes calculate their own responsible index ranges.
-   * Option 3. Only root process reads '/G/evt.seq'. Root calculates
+   * Option 2. Only root process reads '/G/evt.seq'. Root calculates
      responsible index ranges for all processes, and calls MPI_Scatter to 
      scatter the boundaries of ranges (start and end) to all other processes.
+   * Option 3. Distribute reads of evt.seq datasets among processes. Each
+     process got one or more evt.seq dataset assigned makes a single MPI
+     collective read call to read all asigned evt.seq datasets, calculates
+     boundaries for all other processes, and MPI scatters the boundaries.
+   * Option 4. Root process makes POSIX read calls to read all chunks of
+     evt.seq, one dataset at a time, decompress, calculate the boundaries
+     of all processes, and MPI scatter boundaries.
 2. Calculate the responsible index ranges by checking the contents of 
-   **'/G/evt.seq'** to find the starting and ending indices that point to range 
-   of event IDs fall into its responsible range.
+   **'/G/evt.seq'** of a given group **'G'** to find the starting and ending
+   indices that point to range of event IDs fall into its responsible range.
    * Two binary searches should be used, one to search for starting index and
      the other for ending index. This avoid sequentially checking the array
      contents.
 3. All processes read the requested datasets in group G collectively, using
    the starting and ending indices (hyperslab), one dataset at a time.
-   * Note read ranges are not overlapping among all processes.
+   * Note reading index ranges are not overlapping among all processes.
 
+### Data Parallelism vs. Task Parallelism
+The parallelization strategies are developed based on the ideas of data
+parallelism, task parallelism, and maybe a combinations of the two.
+* **Data Parallelism** - All processes read all individual datasets in
+  parallel. In this case, all processes opens each dataset in each group, reads
+  the contents of the dataset using the responsible event ID ranges, and closes
+  the dataset.
+* **Group Parallelism** -
+  + When the number of processes is smaller than the number of groups, the
+    groups are divided among available processes. Each process is reading the
+    datasets of only assigned groups.
+  + When the number of processes is larger than the number of groups, the
+    processes are divided into subsets. Processes in a subset are assigned a
+    group and are responsible to read the datasets in that group. In this
+    approach, groups are considered as **tasks**. Reading multiple groups can
+    occur simultaneously.
+* **Dataset Parallelism** - All datasets among all groups are evenly assigned
+  to the MPI processes. Each process is responsible to read the necessary
+  evt.seq datasets, calculate the index boundaries, reads the data chunks,
+  decompress the chunks, and copy the requested data from decompressed buffers
+  to user buffers.
 
 ### Run Command usage:
   ```
   % ./pandana_read -h
-  Usage: ./pandana_read [-h|-v] [-p number] [-s number] [-m number] [-l file_name] [-i file_name]
+  Usage: ./pandana_read [-h|-v] [-p number] [-s number] [-m number] [-r number] [-l file_name] [-i file_name]
     [-h]           print this command usage message
     [-v]           verbose mode (default: off)
     [-d]           debug mode (default: off)
@@ -77,17 +106,26 @@ Parallel reads consist of the following steps.
                    0: report file open, close, read timings (default)
                    1: report number of chunks read per process
                    2: report read times for individual datasets
-    [-s number]    read method for evt.seq (0, 1, or 2)
+    [-s number]    read method for evt.seq (0, 1, 2, 3, or 4)
                    0: root process reads evt.seq and broadcasts (default)
                    1: all processes read the entire evt.seq collectively
-                   2: root process reads evt.seq and scatters boundaries
-                   3: A single MPI collective read all evt.seq, decompress, and scatters boundaries
-                   4: root POSIX reads chunks of evt.seq, decompress, and scatter boundaries
-    [-m number]    read method for other datasets (0 or 1)
+                   2: root process reads each evt.seq, one at a time, and
+                      scatters boundaries to other processes
+                   3: distribute reads of evt.seq datasets among processes,
+                      each assigned process makes one MPI collective read call
+                      to read all asigned evt.seq and scatter boundaries
+                   4: root POSIX reads all chunks of evt.seq, one dataset at a
+                      time, decompress, and scatter boundaries
+    [-m number]    read method for other datasets (0, 1, or 2)
                    0: use H5Dread (default)
                    1: use MPI_file_read_all one dataset at a time
-                   2: use MPI_file_read_all to read all datasets in one group at a time
-                   1: use MPI_file_read_all
+                   2: use MPI_file_read_all to read all datasets in one group
+                      at a time
+    [-r number]    parallelization method (0 or 1)
+                   0: data parallelism - all processes read each dataset in
+                      parallel (default)
+                   1: group parallelism - processes are divided among groups
+                      then data parallelism within each groups
     [-l file_name] name of file containing dataset names to be read
     [-i file_name] name of input HDF5 file
     *ph5concat version 1.1.0 of March 1, 2020.
@@ -98,37 +136,53 @@ A sample input file named 'dset.txt' is provided in this folder which includes
 names of a list of datasets to be read from the concatenated HDF5 file.
 Example run and output:
   ```
-  % mpiexec -n 4 ./pandana_read -p 1 -s 2 -m 0 -l dset.txt -i nd_165_files_with_evtseq.h5
+  % mpiexec -n 4 ./pandana_read -p 1 -l dset.txt -i nd_165_files_with_evtseq.h5
   Number of MPI processes = 4
   Input dataset name file 'dset.txt'
   Input concatenated HDF5 file 'nd_165_files_with_evtseq.h5'
   Number of datasets to read = 123
   Number of groups = 15
   Maximum number of datasets among groups = 13
-  Read evt.seq method: root process reads evt.seq and scatters boundaries
+  Read evt.seq method: root process H5Dread and broadcasts
   Read datasets method: H5Dread
-  Number of unique evt IDs (size of /spill/evt.seq) = 410679
+  Parallelization: data parallelism (all processes read all datasets)
   ----------------------------------------------------
   MAX and MIN among all 4 processes
-  MAX open_time=0.00 read_seq_time=0.40 read_dset_t=1.02 close_time=0.00
-  MIN open_time=0.00 read_seq_time=0.40 read_dset_t=1.02 close_time=0.00
+  MAX time: open=0.00 evt.seq=0.55 datasets=0.92 close=0.00 inflate=0.00 TOTAL=1.48
+  MIN time: open=0.00 evt.seq=0.55 datasets=0.92 close=0.00 inflate=0.00 TOTAL=1.48
   ----------------------------------------------------
+  Number of unique evt IDs (size of /spill/evt.seq)=410679
   Read amount MAX=4.77 MiB MIN=0.39 MiB (per dataset, per process)
   Amount of evt.seq datasets  259.68 MiB = 0.25 GiB (compressed  11.59 MiB = 0.01 GiB)
   Amount of  other  datasets  924.93 MiB = 0.90 GiB (compressed 181.23 MiB = 0.18 GiB)
   Sum amount of all datasets 1184.61 MiB = 1.16 GiB (compressed 192.82 MiB = 0.19 GiB)
   total number of chunks in all 123 datasets (exclude /spill/evt.seq): 1228
   Aggregate number of chunks read by all processes: 1552
-          averaged among processes: 388.00
-          averaged among processes among datasets: 3.15
+          averaged per process: 388.00
+          averaged per process per dataset: 3.15
   Out of 1228 chunks, number of chunks read by two or more processes: 320
   Out of 1228 chunks, most shared chunk is read by number of processes: 3
   ----------------------------------------------------
+  group                                rec.energy.numu size   118 MiB (zipped   35 MiB) nChunks=122
+  group                                        rec.hdr size    61 MiB (zipped    2 MiB) nChunks=64
+  group                                rec.sel.contain size    83 MiB (zipped   11 MiB) nChunks=86
+  group                                rec.sel.cvn2017 size    66 MiB (zipped    8 MiB) nChunks=68
+  group                          rec.sel.cvnProd3Train size    66 MiB (zipped    8 MiB) nChunks=68
+  group                                  rec.sel.remid size    66 MiB (zipped    4 MiB) nChunks=68
+  group                                        rec.slc size   101 MiB (zipped   21 MiB) nChunks=104
+  group                                      rec.spill size    61 MiB (zipped    2 MiB) nChunks=64
+  group                                 rec.trk.cosmic size    74 MiB (zipped    2 MiB) nChunks=77
+  group                                 rec.trk.kalman size    83 MiB (zipped    3 MiB) nChunks=86
+  group                          rec.trk.kalman.tracks size    94 MiB (zipped   18 MiB) nChunks=95
+  group                         rec.vtx.elastic.fuzzyk size    54 MiB (zipped    2 MiB) nChunks=59
+  group                     rec.vtx.elastic.fuzzyk.png size    92 MiB (zipped    2 MiB) nChunks=97
+  group              rec.vtx.elastic.fuzzyk.png.shwlid size   153 MiB (zipped   67 MiB) nChunks=162
+  group                                          spill size     6 MiB (zipped    1 MiB) nChunks=8
 
 
-  rank   0: number of chunks read=490 (max=4 min=1 avg=3.98 among 108 datasets, exclude evt.seq)
-  rank   1: number of chunks read=392 (max=6 min=1 avg=3.19 among 108 datasets, exclude evt.seq)
-  rank   2: number of chunks read=332 (max=5 min=2 avg=2.70 among 108 datasets, exclude evt.seq)
-  rank   3: number of chunks read=338 (max=6 min=1 avg=2.75 among 108 datasets, exclude evt.seq)
+  rank   0: no. chunks read=490 include evt.seq (max=4 min=1 avg=3.98 among 108 datasets, exclude evt.seq)
+  rank   1: no. chunks read=392 include evt.seq (max=6 min=1 avg=3.19 among 108 datasets, exclude evt.seq)
+  rank   2: no. chunks read=332 include evt.seq (max=5 min=2 avg=2.70 among 108 datasets, exclude evt.seq)
+  rank   3: no. chunks read=338 include evt.seq (max=6 min=1 avg=2.75 among 108 datasets, exclude evt.seq)
   ```
 ---
