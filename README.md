@@ -140,12 +140,12 @@ Example run and output:
   Number of MPI processes = 4
   Input dataset name file 'dset.txt'
   Input concatenated HDF5 file 'nd_165_files_with_evtseq.h5'
+  Number of groups   to read = 15
   Number of datasets to read = 123
-  Number of groups = 15
-  Maximum number of datasets among groups = 13
-  Read evt.seq method: root process H5Dread and broadcasts
-  Read datasets method: H5Dread
-  Parallelization: data parallelism (all processes read all datasets)
+  MAX/MIN no. datasets per group = 13 / 5
+  Read evt.seq    method: root process H5Dread and broadcasts
+  Read datasets   method: H5Dread, one dataset at a time
+  Parallelization method: data parallelism (all processes read individual datasets in parallel)
   ----------------------------------------------------
   MAX and MIN among all 4 processes
   MAX time: open=0.00 evt.seq=0.55 datasets=0.92 close=0.00 inflate=0.00 TOTAL=1.48

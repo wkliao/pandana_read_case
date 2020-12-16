@@ -1837,6 +1837,7 @@ int data_parallelism(MPI_Comm    comm,
         assert(groups[g].nChunks != NULL);
     }
 
+    /* open file to get file ID of HDF5, MPI, POSIX ------------------------*/
     MPI_Barrier(comm);
     open_t = MPI_Wtime();
 
@@ -1870,6 +1871,7 @@ int data_parallelism(MPI_Comm    comm,
     }
     open_t = MPI_Wtime() - open_t;
 
+    /* Read evt.seq datasets ------------------------------------------------*/
     MPI_Barrier(comm);
     read_seq_t = MPI_Wtime();
 
@@ -1923,6 +1925,7 @@ int data_parallelism(MPI_Comm    comm,
         free(debug_lowers);
     }
 
+    /* read the remaining datasets ------------------------------------------*/
     MPI_Barrier(comm);
     read_dset_t = MPI_Wtime();
 
@@ -1956,7 +1959,7 @@ int data_parallelism(MPI_Comm    comm,
 
     read_dset_t = MPI_Wtime() - read_dset_t;
 
-    /* close input file */
+    /* close input file -----------------------------------------------------*/
     MPI_Barrier(comm);
     close_t = MPI_Wtime();
     err = H5Fclose(fd); assert(err >= 0);
@@ -1968,6 +1971,7 @@ int data_parallelism(MPI_Comm    comm,
     if (seq_opt == 4) close(posix_fd);
     close_t = MPI_Wtime() - close_t;
 
+    /* free allocated memory space */
     if (starts != NULL) free(starts);
 
     for (g=0; g<nGroups; g++) {
@@ -2002,7 +2006,6 @@ int group_parallelism(MPI_Comm    comm,
                       double     *timings)
 {
     int nprocs, rank, my_startGrp, my_nGroups;
-    int grp_rank, grp_nprocs;
     MPI_Comm grp_comm;
 
     MPI_Comm_size(comm, &nprocs);
@@ -2033,9 +2036,13 @@ int group_parallelism(MPI_Comm    comm,
         else
             my_startGrp = (rank - (grp_rem * (grp_len+1))) / grp_len + grp_rem;
 
-        MPI_Comm_split(MPI_COMM_WORLD, my_startGrp, rank, &grp_comm);
+	/* split MPI_COMM_WORLD into groups, so an MPI process joins only one
+         * group
+         */
+	MPI_Comm_split(MPI_COMM_WORLD, my_startGrp, rank, &grp_comm);
 
         if (debug) {
+            int grp_rank, grp_nprocs;
             MPI_Comm_rank(grp_comm, &grp_rank);
             MPI_Comm_size(grp_comm, &grp_nprocs);
             printf("%2d nGroups=%d my_startGrp=%2d my_nGroups=%2d grp_rank=%2d grp_nprocs=%2d\n",
@@ -2043,10 +2050,12 @@ int group_parallelism(MPI_Comm    comm,
         }
     }
 
+    groups += my_startGrp;
+    spill_idx -= my_startGrp;
+
     /* within a group, data parallelism method is used */
-    data_parallelism(grp_comm, infile, groups + my_startGrp, my_nGroups,
-                     spill_idx - my_startGrp, seq_opt, dset_opt, profile,
-                     timings);
+    data_parallelism(grp_comm, infile, groups, my_nGroups, spill_idx, seq_opt,
+                     dset_opt, profile, timings);
 
     if (nprocs > nGroups)
         MPI_Comm_free(&grp_comm);
@@ -2099,7 +2108,7 @@ usage(char *progname)
 int main(int argc, char **argv)
 {
     int seq_opt=0, dset_opt=0, profile=0, spill_idx;
-    int c, d, g, nprocs, rank, nGroups, nDatasets, parallelism=0;
+    int c, d, g, nprocs, rank, nGroups, parallelism=0;
     char *listfile=NULL, *infile=NULL;
     double all_t, timings[6], max_t[6], min_t[6];
     NOvA_group *groups=NULL;
@@ -2170,46 +2179,54 @@ int main(int argc, char **argv)
         goto fn_exit;
     }
 
-    if (rank == 0) {
-        printf("Number of MPI processes = %d\n", nprocs);
-        printf("Input dataset name file '%s'\n", listfile);
-        printf("Input concatenated HDF5 file '%s'\n", infile);
-    }
-
     /* read dataset names and get number of datasets, number of groups, maximum
      * number of datasets among groups, find the array index of group /spill
      */
     nGroups = read_dataset_names(rank, listfile, &groups, &spill_idx);
 
-    for (nDatasets=0, g=0; g<nGroups; g++) nDatasets += groups[g].nDatasets;
-
     /* print the running parameters and metadata of input file */
     if (rank == 0) {
-        printf("Number of datasets to read = %d\n", nDatasets);
-        printf("Number of groups = %d\n",nGroups);
-        if (seq_opt == 0)
-            printf("Read evt.seq method: root process H5Dread and broadcasts\n");
-        else if (seq_opt == 1)
-            printf("Read evt.seq method: all processes H5Dread the entire evt.seq collectively\n");
-        else if (seq_opt == 2)
-            printf("Read evt.seq method: root process H5Dread evt.seq and scatters boundaries\n");
-        else if (seq_opt == 3)
-            printf("Read evt.seq method: MPI collective read all evt.seq, decompress, and scatters boundaries\n");
-        else if (seq_opt == 4)
-            printf("Read evt.seq method: root POSIX reads one chunk at a time, decompress, and scatters boundaries\n");
+        int nDatasets, max_nDatasets, min_nDatasets;
+        nDatasets = max_nDatasets = min_nDatasets = groups[0].nDatasets;
+        for (g=1; g<nGroups; g++) {
+            nDatasets += groups[g].nDatasets;
+            max_nDatasets = MAX(max_nDatasets, groups[g].nDatasets);
+            min_nDatasets = MIN(min_nDatasets, groups[g].nDatasets);
+        }
 
+        printf("Number of MPI processes = %d\n", nprocs);
+        printf("Input dataset name text file '%s'\n", listfile);
+        printf("Input concatenated HDF5 file '%s'\n", infile);
+        printf("Number of groups   to read = %d\n", nGroups);
+        printf("Number of datasets to read = %d\n", nDatasets);
+        printf("MAX/MIN no. datasets per group = %d / %d\n", max_nDatasets, min_nDatasets);
+        printf("Read evt.seq    method: ");
+        if (seq_opt == 0)
+            printf("root process H5Dread and broadcasts\n");
+        else if (seq_opt == 1)
+            printf("all processes H5Dread the entire evt.seq collectively\n");
+        else if (seq_opt == 2)
+            printf("root process H5Dread evt.seq and scatters boundaries\n");
+        else if (seq_opt == 3)
+            printf("MPI collective read all evt.seq, decompress, and scatters boundaries\n");
+        else if (seq_opt == 4)
+            printf("root POSIX reads one chunk at a time, decompress, and scatters boundaries\n");
+
+        printf("Read datasets   method: ");
         if (dset_opt == 0)
-            printf("Read datasets method: H5Dread\n");
+            printf("H5Dread, one dataset at a time\n");
         else if (dset_opt == 1)
-            printf("Read datasets method: MPI collective read and decompress, one dataset at a time\n");
+            printf("MPI collective read and decompress, one dataset at a time\n");
         else if (dset_opt == 2)
-            printf("Read datasets method: MPI collective read and decompress, all datasets in one group at a time\n");
+            printf("MPI collective read and decompress, all datasets in one group at a time\n");
+
+        printf("Parallelization method: ");
         if (parallelism == 0)
-            printf("Parallelization: data parallelism (all processes read all datasets)\n");
+            printf("data parallelism (all processes read individual datasets in parallel)\n");
         else if (parallelism == 1)
-            printf("Parallelization: group parallelism (processes divided into groups and data parallelism in each group)\n");
+            printf("group parallelism (processes divided into groups, data parallelism in each group)\n");
         else if (parallelism == 2)
-            printf("Parallelization: dataset parallelism (divide all datasets among processes)\n");
+            printf("dataset parallelism (divide all datasets among processes)\n");
     }
     fflush(stdout);
 
@@ -2235,15 +2252,16 @@ int main(int argc, char **argv)
 
     all_t = MPI_Wtime() - all_t;
 
-    /* find the max/min timings among all processes */
-    max_t[0] = min_t[0] = timings[0]; /* open_t */
-    max_t[1] = min_t[1] = timings[1]; /* read_seq_t */
-    max_t[2] = min_t[2] = timings[2]; /* read_dset_t */
-    max_t[3] = min_t[3] = timings[3]; /* close_t */
-    max_t[4] = min_t[4] = timings[4]; /* inflate_t */
-    max_t[5] = min_t[5] = all_t;
-    MPI_Allreduce(MPI_IN_PLACE, max_t, 6, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, min_t, 6, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+    /* find the max/min timings among all processes.
+     *   timings[0] : open_t      -- file open
+     *   timings[1] : read_seq_t  -- read evt.seq datasets
+     *   timings[2] : read_dset_t -- read other datasets
+     *   timings[3] : close_t     -- file close
+     *   timings[4] : inflate_t   -- data inflation
+     *   timings[5] : all_t       -- end-to-end
+     */
+    MPI_Reduce(timings, max_t, 6, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(timings, min_t, 6, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
 
     if (rank == 0) {
         printf("----------------------------------------------------\n");
