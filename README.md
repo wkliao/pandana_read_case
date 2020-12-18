@@ -148,6 +148,8 @@ Example run and output:
   Parallelization method: data parallelism (all processes read individual datasets in parallel)
   ----------------------------------------------------
   MAX and MIN among all 4 processes
+  MAX read amount: 464.89 MiB (0.45 GiB)
+  MIN read amount: 224.62 MiB (0.22 GiB)
   MAX time: open=0.00 evt.seq=0.55 datasets=0.92 close=0.00 inflate=0.00 TOTAL=1.48
   MIN time: open=0.00 evt.seq=0.55 datasets=0.92 close=0.00 inflate=0.00 TOTAL=1.48
   ----------------------------------------------------
