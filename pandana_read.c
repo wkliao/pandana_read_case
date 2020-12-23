@@ -32,7 +32,7 @@
 #define CHECK_ERROR(err, msg) { \
     fprintf(stderr,"Error at line %d, function %s, file %s: %s\n", \
             __LINE__, __func__,__FILE__, msg); \
-    return err; \
+    assert(0); \
 }
 
 static int verbose, debug;
@@ -40,6 +40,7 @@ static int verbose, debug;
 typedef struct {
     int       nDatasets;  /* number of datasets in this group */
     char    **dset_names; /* [nDatasets] string names of datasets */
+
     void    **buf;        /* [nDatasets] read buffers */
 
     hid_t    *dsets;      /* [nDatasets] HDF5 dataset IDs */
@@ -170,6 +171,7 @@ read_dataset_names(int          rank,
     return nGroups;
 }
 
+#ifdef PREFETCH_METADATA
 /*----< collect_metadata() >-------------------------------------------------*/
 /* collect metadata of all datasets of all groups in one place holder.
  * Note this turns out to be slower than opening dataset right before reading
@@ -230,6 +232,7 @@ collect_metadata(hid_t       fd,
     }
     return 1;
 }
+#endif
 
 /*----< inq_num_unique_IDs() >-----------------------------------------------*/
 /* Inquire the number of globally unique IDs, for example the size of
@@ -458,20 +461,19 @@ posix_read_dataset_by_ID(hid_t   dset,       /* HDF5 dataset ID */
         haddr_t addr;
         hsize_t size;
         ssize_t len;
-        double start_t, end_t;
+        double timing;
 
         err = H5Dget_chunk_info_by_coord(dset, offset, NULL, &addr, &size);
         if (err < 0) CHECK_ERROR(err, "H5Dget_chunk_info_by_coord");
 
-        start_t = MPI_Wtime();
+        if (read_t != NULL) timing = MPI_Wtime();
         lseek(posix_fd, addr, SEEK_SET);
         len = read(posix_fd, zipBuf, size);
         if (len != size) CHECK_ERROR(-1, "read len != size");
 
-        end_t = MPI_Wtime();
-        *read_t += end_t - start_t;
+        if (read_t != NULL) *read_t += MPI_Wtime() - timing;
 
-        start_t = end_t;
+        if (inflate_t != NULL) timing = MPI_Wtime();
         int ret;
         z_stream z_strm;
         z_strm.zalloc    = Z_NULL;
@@ -490,7 +492,7 @@ posix_read_dataset_by_ID(hid_t   dset,       /* HDF5 dataset ID */
 
         offset[0] += chunk_dims[0];
         buf_ptr += chunk_size;
-        *inflate_t += end_t - start_t;
+        if (inflate_t != NULL) *inflate_t += MPI_Wtime() - timing;
     }
     free(zipBuf);
 
@@ -648,7 +650,7 @@ mpi_read_datasets_by_IDs(MPI_Comm    comm,
     if (!is_mono_nondecr)
         qsort(disp_indx, all_nChunks, sizeof(off_len), off_compare);
 
-    timing = MPI_Wtime();
+    if (read_t != NULL) timing = MPI_Wtime();
     /* allocate array_of_blocklengths[] and array_of_displacements[] */
     MPI_Aint *chunk_dsps = (MPI_Aint*) malloc(all_nChunks * sizeof(MPI_Aint));
     if (chunk_dsps == NULL) CHECK_ERROR(-1, "malloc");
@@ -686,10 +688,10 @@ mpi_read_datasets_by_IDs(MPI_Comm    comm,
     /* collective read */
     mpi_err = MPI_File_read_all(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
     if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
-    *read_t += MPI_Wtime() - timing;
+    if (read_t != NULL) *read_t += MPI_Wtime() - timing;
 
     /* decompress individual chunks into buf[] */
-    timing = MPI_Wtime();
+    if (inflate_t != NULL) timing = MPI_Wtime();
     unsigned char *chunkBuf = (unsigned char*) malloc(max_chunk_size);
     if (chunkBuf == NULL) CHECK_ERROR(-1, "malloc");
     for (j=0; j<all_nChunks; j++) {
@@ -726,7 +728,7 @@ mpi_read_datasets_by_IDs(MPI_Comm    comm,
     free(nChunks);
     free(dims[0]);
     free(dims);
-    *inflate_t += MPI_Wtime() - timing;
+    if (inflate_t != NULL) *inflate_t += MPI_Wtime() - timing;
 
     return read_len;
 }
@@ -755,6 +757,7 @@ read_evt_seq_aggr_all(hid_t           fd,
     haddr_t **addr;
     size_t dtype_size=8;
     ssize_t zip_len=0, read_len=0;
+    double timing;
 
     if (nGroups == 0 || (nGroups == 1 && spill_idx == 0)) {
         /* This process has nothing to read, it must still participate the MPI
@@ -920,7 +923,7 @@ read_evt_seq_aggr_all(hid_t           fd,
     if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
 
     /* decompress individual chunks into groups[g].buf[0] */
-    double timing = MPI_Wtime();
+    if (inflate_t != NULL) timing = MPI_Wtime();
     size_t whole_chunk_size = max_chunk_dim * dtype_size;
     unsigned char *whole_chunk = (unsigned char*) malloc(whole_chunk_size);
     if (whole_chunk == NULL) CHECK_ERROR(-1, "malloc");
@@ -955,7 +958,7 @@ read_evt_seq_aggr_all(hid_t           fd,
     free(whole_chunk);
     free(chunk_buf);
     free(disp_indx);
-    *inflate_t += MPI_Wtime() - timing;
+    if (inflate_t != NULL) *inflate_t += MPI_Wtime() - timing;
 
     /* calculate lower and upper boundaries, responsible array index ranges,
      * for all processes
@@ -969,6 +972,7 @@ read_evt_seq_aggr_all(hid_t           fd,
                                                groups[g].dims[0][0]);
         }
         free(groups[g].buf[0]);
+        groups[g].buf[0] = NULL;
     }
     return read_len;
 }
@@ -1004,15 +1008,16 @@ read_evt_seq(MPI_Comm       comm,
     MPI_Comm_size(comm, &nprocs);
     MPI_Comm_rank(comm, &rank);
 
-    if (seq_opt == 3) {
+    if (seq_opt == 3 || seq_opt == 4) {
         /* As there are nGroups number of groups, each contains one evt.seq
          * dataset, assign nGroups evt.seq datasets among MIN(nprocs, nGroups)
-         * number of processes, so they can be read in parallel. The processes
-         * got assigned make a single call to MPI collective read to read all
-         * the assigned evt.seq datasets, decompress, calculate boundaries of
-         * all processes, and scatter them to other processes. Note these are
-         * done in parallel, i.e. workload of reads and computation is
-         * distributed among MIN(nprocs, nGroups) number of processes.
+         * number of processes, so they can be read in parallel. For seq_opt 3,
+         * the processes got assigned make a single call to MPI collective read
+         * to read all the assigned evt.seq datasets, decompress, calculate
+         * boundaries of all processes, and scatter them to other processes.
+         * For seq_opt 4, POSIX read is used to read the dataset chunks. Note
+         * these are done in parallel, i.e. workload of reads and computation
+         * is distributed among MIN(nprocs, nGroups) number of processes.
          */
         long long **bounds;
         int my_startGrp, my_nGroups;
@@ -1044,65 +1049,63 @@ read_evt_seq(MPI_Comm       comm,
             for (g=1; g<my_nGroups; g++)
                 bounds[g] = bounds[g-1] + nprocs * 2;
         }
+        groups += my_startGrp;
 
-#ifdef TEST_mpi_read_datasets_by_IDs
-    hsize_t *dim0 = (hsize_t*) malloc(my_nGroups*sizeof(hsize_t));
-    void **buf = (void**) malloc(my_nGroups*sizeof(char*));
-    hid_t *dsets = (hid_t*)malloc(my_nGroups*sizeof(hid_t));
-    j=0;
-    for (g=0; g<my_nGroups; g++) {
-        if (g == spill_idx-my_startGrp) continue;
-        hsize_t dims[2];
-        dsets[j] = H5Dopen2(fd, groups[my_startGrp+g].dset_names[0], H5P_DEFAULT);
-        if (dsets[j] < 0) CHECK_ERROR(dsets[j], "H5Dopen2");
-        hid_t fspace = H5Dget_space(dsets[j]);
-        if (fspace < 0) CHECK_ERROR(fspace, "H5Dget_space");
-        err = H5Sget_simple_extent_dims(fspace, dims, NULL);
-        if (err < 0) CHECK_ERROR(err, "H5Sget_simple_extent_dims");
-        err = H5Sclose(fspace);
-        if (err < 0) CHECK_ERROR(err, "H5Sclose");
-        dim0[j] = dims[0];
-        hid_t dtype = H5Dget_type(dsets[j]);
-        if (dtype < 0) CHECK_ERROR(dtype, "H5Dget_type");
-        size_t dtype_size = H5Tget_size(dtype);
-        if (dtype_size == 0) CHECK_ERROR(-1, "H5Tget_size");
-        err = H5Tclose(dtype);
-        if (err < 0) CHECK_ERROR(err, "H5Tclose");
-        buf[j] = (void*) malloc(dims[0] * dims[1] * dtype_size);
-        j++;
-    }
-    int ng = j;
-
-    double read_t;
-    read_len += mpi_read_datasets_by_IDs(comm, fd, fh, ng, dsets, buf, &read_t, inflate_t);
-
-    ng = 0;
-    for (g=0; g<my_nGroups; g++) {
-        if (g == spill_idx-my_startGrp) continue;
-        for (j=0, k=0; j<nprocs; j++) {
-            bounds[g][k++] = binary_search_min(starts[j], buf[ng], dim0[ng]);
-            bounds[g][k++] = binary_search_max(ends[j],   buf[ng], dim0[ng]);
+        if (seq_opt == 3) {
+            /* read_evt_seq_aggr_all is a collective call.  Calling this
+             * function makes more sense than mpi_read_datasets_by_IDs(), as
+             * the contents of evt.seq matters only when calculating the upper
+             * and lower bounds. They are useless thereafter. If there are more
+             * than one evt.seq assigned, the read buffer can be reused, hence
+             * save memory space.
+             */
+            read_len += read_evt_seq_aggr_all(fd, fh, groups, my_nGroups, nprocs,
+                                              rank, spill_idx-my_startGrp, starts,
+                                              ends, bounds, inflate_t);
         }
-        free(buf[ng]);
-        err = H5Dclose(dsets[ng]);
-        if (err < 0) CHECK_ERROR(err, "H5Dclose");
-        ng++;
-    }
-    free(dim0);
-    free(buf);
-    free(dsets);
-#else
-        /* read_evt_seq_aggr_all is a collective call.  Calling this function
-         * makes more sense than mpi_read_datasets_by_IDs(), as the contents of evt.seq
-         * matters only when calculating the upper and lower bounds. They are
-         * useless thereafter. If there are more than one evt.seq assigned, the
-         * read buffer can be reused, hence save memory space.
-         */
-        read_len += read_evt_seq_aggr_all(fd, fh, groups+my_startGrp,
-                                          my_nGroups, nprocs, rank,
-                                          spill_idx-my_startGrp, starts, ends,
-                                          bounds, inflate_t);
-#endif
+        else if (seq_opt == 4) {
+            /* POSIX read to read evt.seq datasets */
+            for (g=0; g<my_nGroups; g++) {
+                if (g == spill_idx-my_startGrp) continue;
+
+                hsize_t dims[2];
+                hid_t dset = H5Dopen2(fd, groups[g].dset_names[0], H5P_DEFAULT);
+                if (dset < 0) CHECK_ERROR(dset, "H5Dopen2");
+
+                /* inquire dimension sizes of dset */
+                hid_t fspace = H5Dget_space(dset);
+                if (fspace < 0) CHECK_ERROR(fspace, "H5Dget_space");
+                err = H5Sget_simple_extent_dims(fspace, dims, NULL);
+                if (err < 0) CHECK_ERROR(err, "H5Sget_simple_extent_dims");
+                if (dims[1] != 1) CHECK_ERROR(err, "dims[1] != 1");
+                err = H5Sclose(fspace);
+                if (err < 0) CHECK_ERROR(err, "H5Sclose");
+
+                /* evt.seq data type is aways H5T_STD_I64LE and of size 8 bytes */
+                hid_t dtype = H5Dget_type(dset);
+                if (H5Tequal(dtype, H5T_STD_I64LE) <= 0) CHECK_ERROR(-1, "dtype != H5T_STD_I64LE");
+                size_t dtype_size = H5Tget_size(dtype);
+                if (dtype_size != 8) CHECK_ERROR(-1, "evt.seq dtype_size != 8");
+                err = H5Tclose(dtype);
+                if (err < 0) CHECK_ERROR(err, "H5Tclose");
+
+                void *seqBuf = (void*) malloc(dims[0] * dtype_size);
+                if (seqBuf == NULL) CHECK_ERROR(-1, "malloc");
+
+                /* posix_read_dataset_by_ID() is an independent call */
+                read_len += posix_read_dataset_by_ID(dset, posix_fd, seqBuf,
+                                                     &groups[g].read_t[0],
+                                                     inflate_t);
+                for (k=0, j=0; j<nprocs; j++) {
+                    bounds[g][k++] = binary_search_min(starts[j], seqBuf, dims[0]);
+                    bounds[g][k++] = binary_search_max(ends[j],   seqBuf, dims[0]);
+                }
+                free(seqBuf);
+                err = H5Dclose(dset);
+                if (err < 0) CHECK_ERROR(err, "H5Dclose");
+            }
+        }
+
         /* bounds calculated from nGroups number of evt.seq are read by nGroups
          * number of processes in parallel. There will be nGroups calls to
          * MPI_Scatter from nGroups number of roots. Now calculate rank of root
@@ -1141,74 +1144,6 @@ read_evt_seq(MPI_Comm       comm,
     /* for other options, evt.seq datasets are read one at a time, so a single
      * array of bounds is enough */
     long long *bounds;
-
-    if (seq_opt == 4) {
-        /* When root reads an evt.seq dataset, use POSIX read to read
-         * individual chunks, decompress them, and scatter boundaries
-         */
-        if (rank == 0) {
-            bounds = (long long*) malloc(nprocs * 2 * sizeof(long long));
-            if (bounds == NULL) CHECK_ERROR(-1, "malloc");
-        }
-
-        for (g=0; g<nGroups; g++) {
-            /* read dataset evt.seq, the first dataset in the group, and
-             * calculate the event range (lower and upper bound indices)
-             * responsible by this process
-             */
-            if (g == spill_idx) {
-                /* no need to read /spill/evt.seq */
-                lowers[g] = starts[rank];
-                uppers[g] = ends[rank];
-                continue;
-            }
-
-            /* root process reads evt.seq in this group g, calculates
-             * boundaries, and scatters them
-             */
-            if (rank == 0) {
-                hsize_t dims[2];
-                hid_t dset = H5Dopen2(fd, groups[g].dset_names[0], H5P_DEFAULT);
-                if (dset < 0) CHECK_ERROR(dset, "H5Dopen2");
-
-                /* inquire dimension sizes of dset */
-                hid_t fspace = H5Dget_space(dset);
-                if (fspace < 0) CHECK_ERROR(fspace, "H5Dget_space");
-                err = H5Sget_simple_extent_dims(fspace, dims, NULL);
-                if (err < 0) CHECK_ERROR(err, "H5Sget_simple_extent_dims");
-                err = H5Sclose(fspace);
-                if (err < 0) CHECK_ERROR(err, "H5Sclose");
-
-                hid_t dtype = H5Dget_type(dset);
-                if (dtype < 0) CHECK_ERROR(dtype, "H5Dget_type");
-                size_t dtype_size = H5Tget_size(dtype);
-                if (dtype_size == 0) CHECK_ERROR(-1, "H5Tget_size");
-                err = H5Tclose(dtype);
-                if (err < 0) CHECK_ERROR(err, "H5Tclose");
-
-                void *seqBuf = (void*) malloc(dims[0] * dtype_size);
-                if (seqBuf == NULL) CHECK_ERROR(-1, "malloc");
-
-                /* posix_read_dataset_by_ID() is an independent call */
-                read_len += posix_read_dataset_by_ID(dset, posix_fd, seqBuf,
-                                                     &groups[g].read_t[0],
-                                                     inflate_t);
-                for (j=0, k=0; j<nprocs; j++) {
-                    bounds[k++] = binary_search_min(starts[j], seqBuf, dims[0]);
-                    bounds[k++] = binary_search_max(ends[j],   seqBuf, dims[0]);
-                }
-                free(seqBuf);
-                err = H5Dclose(dset);
-                if (err < 0) CHECK_ERROR(err, "H5Dclose");
-            }
-            MPI_Scatter(bounds, 2, MPI_LONG_LONG, lower_upper, 2, MPI_LONG_LONG,
-                        0, comm);
-            lowers[g] = lower_upper[0];
-            uppers[g] = lower_upper[1];
-        }
-        if (rank == 0) free(bounds);
-        return 1;
-    }
 
     /* seq_opt == 0, 1, or 2 */
     if (seq_opt == 2 && rank == 0) {
@@ -1511,6 +1446,7 @@ mpio_read_subarray(hid_t          fd,         /* HDF5 file descriptor */
     herr_t  err;
     hsize_t dims[2], chunk_dims[2];
     ssize_t zip_len=0, read_len = 0;
+    double timing;
 
     /* open dataset */
     hid_t dset = H5Dopen2(fd, dset_name, H5P_DEFAULT);
@@ -1629,7 +1565,7 @@ mpio_read_subarray(hid_t          fd,         /* HDF5 file descriptor */
     if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
 
     /* decompress each chunk into buf */
-    double timing = MPI_Wtime();
+    if (inflate_t != NULL)  timing = MPI_Wtime();
     size_t whole_chunk_size = chunk_dims[0] * chunk_dims[1] * dtype_size;
     unsigned char *whole_chunk = (unsigned char*) malloc(whole_chunk_size);
     if (whole_chunk == NULL) CHECK_ERROR(-1, "malloc");
@@ -1681,7 +1617,7 @@ mpio_read_subarray(hid_t          fd,         /* HDF5 file descriptor */
     free(whole_chunk);
     free(zipBuf);
     free(disp_indx);
-    *inflate_t += MPI_Wtime() - timing;
+    if (inflate_t != NULL) *inflate_t += MPI_Wtime() - timing;
 
     return read_len;
 }
@@ -1838,7 +1774,7 @@ mpio_read_subarrays(hid_t       fd,
         if (profile == 2) group->read_t[d]=MPI_Wtime()-group->read_t[d];
 
         /* decompress each chunk into group->buf[d] */
-        timing = MPI_Wtime();
+        if (inflate_t != NULL) timing = MPI_Wtime();
         size_t whole_chunk_size = chunk_dims[0] * chunk_dims[1] * dtype_size;
         whole_chunk = (unsigned char*) malloc(whole_chunk_size);
         if (whole_chunk == NULL) CHECK_ERROR(-1, "malloc");
@@ -1890,7 +1826,7 @@ mpio_read_subarrays(hid_t       fd,
         free(whole_chunk);
         free(chunk_buf);
         free(disp_indx);
-        *inflate_t += MPI_Wtime() - timing;
+        if (inflate_t != NULL) *inflate_t += MPI_Wtime() - timing;
     }
     return read_len;
 }
@@ -1914,6 +1850,7 @@ mpio_read_subarrays_aggr(hid_t       fd,
     haddr_t **addr;
     size_t nChunks=0, max_chunk_size=0, buf_len, *dtype_size;
     ssize_t read_len=0, zip_len=0;
+    double timing;
 
     dtype_size = group->dtype_size;
 
@@ -2063,7 +2000,7 @@ mpio_read_subarrays_aggr(hid_t       fd,
     if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
 
     /* decompress individual chunks into group->buf[d] */
-    double timing = MPI_Wtime();
+    if (inflate_t != NULL) timing = MPI_Wtime();
     unsigned char *whole_chunk = (unsigned char*) malloc(max_chunk_size);
     if (whole_chunk == NULL) CHECK_ERROR(-1, "malloc");
     for (j=0; j<nChunks; j++) {
@@ -2120,7 +2057,7 @@ mpio_read_subarrays_aggr(hid_t       fd,
     free(whole_chunk);
     free(chunk_buf);
     free(disp_indx);
-    *inflate_t += MPI_Wtime() - timing;
+    if (inflate_t != NULL) *inflate_t += MPI_Wtime() - timing;
 
     return read_len;
 }
@@ -2172,7 +2109,7 @@ data_parallelism(MPI_Comm    comm,
         /* allocate space to store dimension sizes */
         groups[g].dims = (hsize_t**) malloc(nDatasets * sizeof(hsize_t*));
         if (groups[g].dims == NULL) CHECK_ERROR(-1, "malloc");
-        groups[g].dims[0] = (hsize_t*) malloc(nDatasets * 2 * sizeof(hsize_t*));
+        groups[g].dims[0] = (hsize_t*) malloc(nDatasets * 2 * sizeof(hsize_t));
         if (groups[g].dims[0] == NULL) CHECK_ERROR(-1, "malloc");
         for (d=1; d<nDatasets; d++)
             groups[g].dims[d] = groups[g].dims[d-1] + 2;
@@ -2180,7 +2117,7 @@ data_parallelism(MPI_Comm    comm,
         /* allocate space to store chunk dimension sizes */
         groups[g].chunk_dims = (hsize_t**) malloc(nDatasets * sizeof(hsize_t*));
         if (groups[g].chunk_dims == NULL) CHECK_ERROR(-1, "malloc");
-        groups[g].chunk_dims[0] = (hsize_t*) malloc(nDatasets * 2 * sizeof(hsize_t*));
+        groups[g].chunk_dims[0] = (hsize_t*) malloc(nDatasets * 2 * sizeof(hsize_t));
         if (groups[g].chunk_dims[0] == NULL) CHECK_ERROR(-1, "malloc");
         for (d=1; d<nDatasets; d++)
             groups[g].chunk_dims[d] = groups[g].chunk_dims[d-1] + 2;
@@ -2425,7 +2362,7 @@ group_parallelism(MPI_Comm    comm,
     if (nprocs > nGroups)
         MPI_Comm_free(&grp_comm);
 
-    return 1;
+    return read_len;
 }
 
 /*----< chunk_statistics() >-------------------------------------------------*/
@@ -2925,9 +2862,9 @@ int main(int argc, char **argv)
         else if (seq_opt == 2)
             printf("root process H5Dread evt.seq and scatters boundaries\n");
         else if (seq_opt == 3)
-            printf("MPI collective read all evt.seq, decompress, and scatters boundaries\n");
+            printf("Distributed MPI collective read evt.seq datasets, decompress, and scatters boundaries\n");
         else if (seq_opt == 4)
-            printf("root POSIX reads one chunk at a time, decompress, and scatters boundaries\n");
+            printf("Distributed POSIX read evt.seq datasets, decompress, and scatters boundaries\n");
 
         printf("Read datasets   method: ");
         if (dset_opt == 0)
