@@ -141,7 +141,6 @@ herr_t print_names(hid_t             loc_id,        /* object ID */
             printf("/%s\n",name);
     }
 
-fn_exit:
     it_op->err = 0;
     return 0;
 }
@@ -208,12 +207,12 @@ int main(int argc, char **argv)
 #endif
 
     if (debug) {
-        printf("number of groups           = %zd\n", nGroups);
+        printf("number of groups           = %zd\n", (size_t)nGroups);
         printf("number of zero-size groups = %d\n", numZeroGrp);
         printf("number of large groups     = %d\n", numLargeGrp);
-        printf("number of groups size < %d MiB = %d\n",
-               upper_bound,nGroups-numZeroGrp-numLargeGrp);
-        printf("size of spill group[%d] = %d (%d MiB)\n", it_op.spill_grp,
+        printf("number of groups size < %d MiB = %zd\n",
+               upper_bound,(size_t)nGroups-numZeroGrp-numLargeGrp);
+        printf("size of spill group[%d] = %zd (%zd MiB)\n", it_op.spill_grp,
                grp_size[it_op.spill_grp], grp_size[it_op.spill_grp]/1048576);
     }
 
