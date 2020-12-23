@@ -1,9 +1,9 @@
 # Case Studies
 
 ---
-## PandAna Parallel Read
+## PandAna Parallel Read Kernel Benchmark
 
-**pandana_read.c** is a MPI-based  C program developed to study the performance
+**pandana_benchmark.c** is a MPI-based  C program developed to study the performance
 of parallel read from NOvA file produced by **ph5_concat**. It uses the same
 data partitioning pattern as [PandAna](https://bitbucket.org/mpaterno/pandana),
 a Python package that can be used to select NOvA events of interest.
@@ -97,24 +97,21 @@ parallelism, task parallelism, and maybe a combinations of the two.
 
 ### Run Command usage:
   ```
-  % ./pandana_read -h
-  Usage: ./pandana_read [-h|-v] [-p number] [-s number] [-m number] [-r number] [-l file_name] [-i file_name]
+  % ./pandana_benchmark -h
+  Usage: ./pandana_benchmark [-h] [-p number] [-s number] [-m number] [-r number] [-l file_name] [-i file_name]
     [-h]           print this command usage message
-    [-v]           verbose mode (default: off)
-    [-d]           debug mode (default: off)
-    [-p number]    performance profiling method (0, 1, or 2)
+    [-p number]    performance profiling method (0 or 1)
                    0: report file open, close, read timings (default)
                    1: report number of chunks read per process
-                   2: report read times for individual datasets
-    [-s number]    read method for evt.seq (0, 1, 2, 3, or 4)
-                   0: root process reads evt.seq and broadcasts (default)
-                   1: all processes read the entire evt.seq collectively
-                   2: root process reads each evt.seq, one at a time, and
-                      scatters boundaries to other processes
-                   3: distribute reads of evt.seq datasets among processes,
-                      each assigned process makes one MPI collective read call
-                      to read all asigned evt.seq and scatter boundaries
-                   4: root POSIX reads all chunks of evt.seq, one dataset at a
+    [-s number]    read method for key datasets (0, 1, 2, 3, or 4)
+                   0: root process HDF5 reads and broadcasts (default)
+                   1: all processes HDF5 read the entire keys collectively
+                   2: root process HDF5 reads each key, one at a time,
+                      calculates, scatters boundaries to other processes
+                   3: distribute key reading among processes, make one MPI
+                      collective read to read all asigned keys, and scatter
+                      boundaries to other processes
+                   4: root POSIX reads all chunks of keys, one dataset at a
                       time, decompress, and scatter boundaries
     [-m number]    read method for other datasets (0, 1, or 2)
                    0: use H5Dread (default)
@@ -126,6 +123,7 @@ parallelism, task parallelism, and maybe a combinations of the two.
                       parallel (default)
                    1: group parallelism - processes are divided among groups
                       then data parallelism within each groups
+                   2: dataset parallelism - divide all datasets among processes
     [-l file_name] name of file containing dataset names to be read
     [-i file_name] name of input HDF5 file
     *ph5concat version 1.1.0 of March 1, 2020.
@@ -136,34 +134,35 @@ A sample input file named 'dset.txt' is provided in this folder which includes
 names of a list of datasets to be read from the concatenated HDF5 file.
 Example run and output:
   ```
-  % mpiexec -n 4 ./pandana_read -p 1 -l dset.txt -i nd_165_files_with_evtseq.h5
+  % mpiexec -n 4 ./pandana_benchmark -l dset.txt -i nd_165_files_with_evtseq.h5 -p1
+
   Number of MPI processes = 4
   Input dataset name file 'dset.txt'
   Input concatenated HDF5 file 'nd_165_files_with_evtseq.h5'
   Number of groups   to read = 15
   Number of datasets to read = 123
   MAX/MIN no. datasets per group = 13 / 5
-  Read evt.seq    method: root process H5Dread and broadcasts
-  Read datasets   method: H5Dread, one dataset at a time
+  Read key   datasets method: root process H5Dread and broadcasts
+  Read other datasets method: H5Dread, one dataset at a time
   Parallelization method: data parallelism (all processes read individual datasets in parallel)
   ----------------------------------------------------
   MAX and MIN among all 4 processes
-  MAX read amount: 464.89 MiB (0.45 GiB)
+  MAX read amount: 468.02 MiB (0.46 GiB)
   MIN read amount: 224.62 MiB (0.22 GiB)
-  MAX time: open=0.00 evt.seq=0.55 datasets=0.92 close=0.00 inflate=0.00 TOTAL=1.48
-  MIN time: open=0.00 evt.seq=0.55 datasets=0.92 close=0.00 inflate=0.00 TOTAL=1.48
+  MAX time: open=0.00 key=0.71 datasets=0.93 close=0.00 inflate=0.00 TOTAL=1.65
+  MIN time: open=0.00 key=0.71 datasets=0.93 close=0.00 inflate=0.00 TOTAL=1.65
   ----------------------------------------------------
-  Number of unique evt IDs (size of /spill/evt.seq)=410679
+  Number of unique IDs (size of /spill/evt.seq)=410679
   Read amount MAX=4.77 MiB MIN=0.39 MiB (per dataset, per process)
-  Amount of evt.seq datasets  259.68 MiB = 0.25 GiB (compressed  11.59 MiB = 0.01 GiB)
+  Amount of evt.seq datasets  262.81 MiB = 0.26 GiB (compressed  12.18 MiB = 0.01 GiB)
   Amount of  other  datasets  924.93 MiB = 0.90 GiB (compressed 181.23 MiB = 0.18 GiB)
-  Sum amount of all datasets 1184.61 MiB = 1.16 GiB (compressed 192.82 MiB = 0.19 GiB)
-  total number of chunks in all 123 datasets (exclude /spill/evt.seq): 1228
-  Aggregate number of chunks read by all processes: 1552
-          averaged per process: 388.00
-          averaged per process per dataset: 3.15
-  Out of 1228 chunks, number of chunks read by two or more processes: 320
-  Out of 1228 chunks, most shared chunk is read by number of processes: 3
+  Sum amount of all datasets 1187.74 MiB = 1.16 GiB (compressed 193.42 MiB = 0.19 GiB)
+  total number of chunks in all 123 datasets (exclude /spill/evt.seq): 1232
+  Aggregate number of chunks read by all processes: 1556
+          averaged per process: 389.00
+          averaged per process per dataset: 3.16
+  Out of 1232 chunks, number of chunks read by two or more processes: 320
+  Out of 1232 chunks, most shared chunk is read by number of processes: 3
   ----------------------------------------------------
   group                                rec.energy.numu size   118 MiB (zipped   35 MiB) nChunks=122
   group                                        rec.hdr size    61 MiB (zipped    2 MiB) nChunks=64
@@ -179,10 +178,10 @@ Example run and output:
   group                         rec.vtx.elastic.fuzzyk size    54 MiB (zipped    2 MiB) nChunks=59
   group                     rec.vtx.elastic.fuzzyk.png size    92 MiB (zipped    2 MiB) nChunks=97
   group              rec.vtx.elastic.fuzzyk.png.shwlid size   153 MiB (zipped   67 MiB) nChunks=162
-  group                                          spill size     6 MiB (zipped    1 MiB) nChunks=8
+  group                                          spill size     9 MiB (zipped    1 MiB) nChunks=12
 
 
-  rank   0: no. chunks read=490 include evt.seq (max=4 min=1 avg=3.98 among 108 datasets, exclude evt.seq)
+  rank   0: no. chunks read=494 include evt.seq (max=4 min=1 avg=4.02 among 108 datasets, exclude evt.seq)
   rank   1: no. chunks read=392 include evt.seq (max=6 min=1 avg=3.19 among 108 datasets, exclude evt.seq)
   rank   2: no. chunks read=332 include evt.seq (max=5 min=2 avg=2.70 among 108 datasets, exclude evt.seq)
   rank   3: no. chunks read=338 include evt.seq (max=6 min=1 avg=2.75 among 108 datasets, exclude evt.seq)
