@@ -73,13 +73,12 @@ get_timings(double t[NUM_TIMERS])
 
 static ssize_t
 hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
-                  hid_t      fd,         /* HDF5 file ID */
-                  MPI_File   fh,         /* MPI file handler */
-                  int        nGroups,    /* number of key datasets */
-                  char     **key_names,  /* [nGroups] key dataset names */
-                  long long  numIDs,     /* number of globally unique IDs */
-                  size_t    *lowers,     /* OUT: [nGroups] */
-                  size_t    *uppers)     /* OUT: [nGroups] */
+               hid_t      fd,         /* HDF5 file ID */
+               int        nGroups,    /* number of key datasets */
+               char     **key_names,  /* [nGroups] key dataset names */
+               long long  numIDs,     /* number of globally unique IDs */
+               size_t    *lowers,     /* OUT: [nGroups] */
+               size_t    *uppers)     /* OUT: [nGroups] */
 {
     int g, j, k, nprocs, rank;
     herr_t err;
@@ -572,6 +571,36 @@ pandana_mpi_read_dsets(MPI_Comm    comm,       /* MPI communicator */
     free(dims);
 
     return read_len;
+}
+
+/*----< pandana_hdf5_read_dset() >-------------------------------------------*/
+/* Call H5Dread to read a whole dataset from file.
+ */
+ssize_t
+pandana_hdf5_read_dset(hid_t  fd,    /* HDF5 file descriptor */
+                       hid_t  dset,  /* dataset ID */
+                       void  *buf)   /* user read buffer */
+{
+    herr_t  err;
+    hid_t   dtype;
+    hsize_t dims[2];
+    size_t dtype_size;
+
+    /* inquire dimension sizes of dset */
+    inq_dset_meta(dset, &dtype_size, dims, NULL);
+
+    /* inquire data type and size */
+    dtype = H5Dget_type(dset);
+    if (dtype < 0) CHECK_ERROR(dtype, "H5Dget_type");
+
+    /* read from file into buf */
+    err = H5Dread(dset, dtype, H5S_ALL, H5S_ALL, H5P_DEFAULT, buf);
+    if (err < 0) CHECK_ERROR(err, "H5Dread");
+
+    err = H5Tclose(dtype);
+    if (err < 0) CHECK_ERROR(err, "H5Tclose");
+
+    return (dims[0] * dims[1] * dtype_size);
 }
 
 /*----< pandana_hdf5_read_subarray() >---------------------------------------*/
@@ -1366,8 +1395,7 @@ pandana_read_keys(MPI_Comm   comm,       /* MPI communicator */
 
 #ifdef PANDANA_BENCHMARK
 if (seq_opt < 3)
-    return hdf5_read_keys(comm, fd, fh, nGroups, key_names, numIDs,
-                          lowers, uppers);
+    return hdf5_read_keys(comm, fd, nGroups, key_names, numIDs, lowers, uppers);
 #endif
 
     MPI_Comm_size(comm, &nprocs);
@@ -1777,6 +1805,137 @@ pandana_group_parallelism(MPI_Comm    comm,     /* MPI communicator */
 
     if (nprocs > nGroups)
         MPI_Comm_free(&grp_comm);
+
+    return read_len;
+}
+
+/*----< pandana_datset_parallelism() >---------------------------------------*/
+/* Divide all datasets among all processes. Each process reads the entire
+ * datasets assigned.
+ */
+ssize_t
+pandana_dataset_parallelism(MPI_Comm    comm,     /* MPI communicator */
+                            const char *infile,   /* input HDF5 file name */
+                            int         nGroups,  /* number of groups */
+                            NOvA_group *groups)   /* array of group objects */
+{
+    int j, d, g, nprocs, rank, nDatasets, my_startDset, my_nDatasets;
+    ssize_t read_len=0;
+    herr_t err;
+
+#ifdef PANDANA_BENCHMARK
+    double open_t, read_dset_t, close_t;
+
+    MPI_Barrier(comm);
+    open_t = MPI_Wtime();
+#endif
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &nprocs);
+
+    /* Independent open input file for reading */
+    hid_t fd = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
+    if (fd < 0) {
+        fprintf(stderr,"%d: Error %s: fail to open file %s (%s)\n",
+                rank, __func__, infile, strerror(errno));
+        fflush(stderr);
+        return -1;
+    }
+#ifdef PANDANA_BENCHMARK
+    open_t = MPI_Wtime() - open_t;
+
+    /* Read key datasets ----------------------------------------------------*/
+    MPI_Barrier(comm);
+    read_dset_t = MPI_Wtime();
+#endif
+
+    /* calculate total number of datasets (except key datasets) */
+    nDatasets = 0;
+    for (g=0; g<nGroups; g++)
+        nDatasets += groups[g].nDatasets - 1;
+
+    /* construct a list of key dataset names */
+    char **key_names = (char**) malloc(nDatasets * sizeof(char*));
+    j = 0;
+    for (g=0; g<nGroups; g++)
+        for (d=1; d<groups[g].nDatasets; d++)
+            key_names[j++] = groups[g].dset_names[d];
+
+    /* calculate the starting index and the number of assigned datasets */
+    my_nDatasets = nDatasets / nprocs;
+    my_startDset = my_nDatasets * rank;
+    if (rank < nDatasets % nprocs) {
+        my_startDset += rank;
+        my_nDatasets++;
+    }
+    else
+        my_startDset += nDatasets % nprocs;
+
+    void **buf = (void**) malloc(my_nDatasets * sizeof(void*));
+
+    for (d=0; d<my_nDatasets; d++) {
+        hid_t dset = H5Dopen2(fd, key_names[my_startDset+d], H5P_DEFAULT);
+        if (dset < 0) CHECK_ERROR(dset, "H5Dopen2");
+
+        /* inquire dimension sizes of dset */
+        hsize_t dims[2];
+        hid_t fspace = H5Dget_space(dset);
+        if (fspace < 0) CHECK_ERROR(fspace, "H5Dget_space");
+        err = H5Sget_simple_extent_dims(fspace, dims, NULL);
+        if (err < 0) CHECK_ERROR(err, "H5Sget_simple_extent_dims");
+        err = H5Sclose(fspace);
+        if (err < 0) CHECK_ERROR(err, "H5Sclose");
+
+        /* get data type and size */
+        hid_t dtype = H5Dget_type(dset);
+        if (dtype < 0) CHECK_ERROR(dtype, "H5Dget_type");
+        size_t dtype_size = H5Tget_size(dtype);
+        if (dtype_size == 0) CHECK_ERROR(-1, "H5Tget_size");;
+
+        /* allocate read buffers */
+        size_t buf_len = dims[0] * dims[1] * dtype_size;
+        buf[d] = (void*) malloc(buf_len);
+        if (buf[d] == NULL) CHECK_ERROR(-1, "malloc");
+        read_len += buf_len;
+
+        /* read from file into buf */
+        err = H5Dread(dset, dtype, H5S_ALL, H5S_ALL, H5P_DEFAULT, buf[d]);
+        if (err < 0) CHECK_ERROR(err, "H5Dread");
+
+        err = H5Tclose(dtype);
+        if (err < 0) CHECK_ERROR(err, "H5Tclose");
+
+        err = H5Dclose(dset);
+        if (err < 0) CHECK_ERROR(err, "H5Dclose");
+    }
+
+    /* This is where PandAna performs computation to identify events of
+     * interest from the read buffers
+     */
+
+    // printf("%d %s my_startDset=%d my_nDatasets=%d read_len=%.2f MiB\n",rank,__func__,my_startDset,my_nDatasets,(float)read_len/1048576.0);
+
+    for (d=0; d<my_nDatasets; d++) free(buf[d]);
+    free(buf);
+    free(key_names);
+
+#ifdef PANDANA_BENCHMARK
+    read_dset_t = MPI_Wtime() - read_dset_t;
+
+    /* close input file -----------------------------------------------------*/
+    MPI_Barrier(comm);
+    close_t = MPI_Wtime();
+#endif
+    err = H5Fclose(fd);
+    if (err < 0) CHECK_ERROR(err, "H5Fclose");
+#ifdef PANDANA_BENCHMARK
+    close_t = MPI_Wtime() - close_t;
+
+    timings[0] = open_t;
+    timings[1] = 0.0; /* read_seq_t */
+    timings[2] = read_dset_t;
+    timings[3] = close_t;
+    timings[4] = 0.0; /* inflate_t */
+#endif
 
     return read_len;
 }

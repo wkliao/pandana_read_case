@@ -89,11 +89,10 @@ parallelism, task parallelism, and maybe a combinations of the two.
     group and are responsible to read the datasets in that group. In this
     approach, groups are considered as **tasks**. Reading multiple groups can
     occur simultaneously.
-* **Dataset Parallelism** - All datasets among all groups are evenly assigned
-  to the MPI processes. Each process is responsible to read the necessary
-  evt.seq datasets, calculate the index boundaries, reads the data chunks,
-  decompress the chunks, and copy the requested data from decompressed buffers
-  to user buffers.
+* **Dataset Parallelism** - All datasets, except key datasets, in all groups
+  are evenly assigned to the MPI processes. One dataset is read entirely by a
+  process only. Each process is responsible to read the assigned dataset. In
+  this case, only HDF5 read is called.
 
 ### Run Command usage:
   ```

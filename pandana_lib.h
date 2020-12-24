@@ -94,3 +94,9 @@ pandana_group_parallelism(MPI_Comm    comm,     /* MPI communicator */
                           NOvA_group *groups,   /* array of group objects */
                           long long   numIDs);  /* number of unique IDs */
 
+ssize_t
+pandana_dataset_parallelism(MPI_Comm    comm,     /* MPI communicator */
+                            const char *infile,   /* input HDF5 file name */
+                            int         nGroups,  /* number of groups */
+                            NOvA_group *groups);  /* array of group objects */
+

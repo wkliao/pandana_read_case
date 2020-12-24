@@ -530,11 +530,6 @@ int main(int argc, char **argv)
         }
         goto fn_exit;
     }
-    if (parallelism == 2) {
-        if (rank  == 0)
-            printf("dataset parallelism has not been implemented yet ... exit\n");
-        goto fn_exit;
-    }
 
     /* From file 'listfile', read dataset names, calculate number of datasets,
      * number of groups, maximum number of datasets among groups
@@ -631,7 +626,8 @@ int main(int argc, char **argv)
         read_len = pandana_group_parallelism(MPI_COMM_WORLD, infile, nGroups,
                                     groups, numIDs);
     else if (parallelism == 2) /* dataset parallelism */
-        printf("dataset parallelism has not been implemented yet\n");
+        read_len = pandana_dataset_parallelism(MPI_COMM_WORLD, infile, nGroups,
+                                    groups);
 
     timings[5] = MPI_Wtime() - all_t;
 
