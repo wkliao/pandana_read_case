@@ -160,7 +160,7 @@ chunk_statistics(MPI_Comm    comm,
     int g, d, j, nprocs, rank, all_nDatasets;
     int nchunks_shared=0, max_shared_chunks=0;
     int max_nchunks_read=0, min_nchunks_read=INT_MAX, total_nchunks=0;
-    long long aggr_nchunks_read, my_nchunks_read=0;
+    long long aggr_nchunks_read, my_nchunks_read=0, my_nchunks_read_nokeys=0;
     long long all_dset_size, all_evt_seq_size;
     long long all_dset_size_z, all_evt_seq_size_z;
     long long maxRead=0, minRead=LONG_MAX;
@@ -313,6 +313,7 @@ chunk_statistics(MPI_Comm    comm,
             /* calculate number of chunks read by this process */
             int nchunks = (uppers[g] / chunk_dims[0]) - (lowers[g] / chunk_dims[0]) + 1;
             my_nchunks_read += nchunks;
+            my_nchunks_read_nokeys += nchunks;
             max_nchunks_read = MAX(max_nchunks_read, nchunks);
             min_nchunks_read = MIN(min_nchunks_read, nchunks);
 
@@ -412,7 +413,7 @@ chunk_statistics(MPI_Comm    comm,
 
     printf("rank %3d: no. chunks read=%lld include evt.seq (max=%d min=%d avg=%.2f among %d datasets, exclude evt.seq)\n",
            rank, my_nchunks_read, max_nchunks_read, min_nchunks_read,
-           (float)my_nchunks_read/(float)all_nDatasets, all_nDatasets-nGroups);
+           (float)my_nchunks_read_nokeys/(float)all_nDatasets, all_nDatasets-nGroups);
 
     for (g=0; g<nGroups; g++)
         free(nChunks[g]);
