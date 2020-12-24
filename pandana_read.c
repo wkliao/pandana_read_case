@@ -460,7 +460,6 @@ posix_read_dataset_by_ID(hid_t   dset,       /* HDF5 dataset ID */
     for (j=0; j<nChunks; j++) {
         haddr_t addr;
         hsize_t size;
-        ssize_t len;
         double timing;
 
         err = H5Dget_chunk_info_by_coord(dset, offset, NULL, &addr, &size);
@@ -468,7 +467,7 @@ posix_read_dataset_by_ID(hid_t   dset,       /* HDF5 dataset ID */
 
         if (read_t != NULL) timing = MPI_Wtime();
         lseek(posix_fd, addr, SEEK_SET);
-        len = read(posix_fd, zipBuf, size);
+        ssize_t len = read(posix_fd, zipBuf, size);
         if (len != size) CHECK_ERROR(-1, "read len != size");
 
         if (read_t != NULL) *read_t += MPI_Wtime() - timing;
@@ -1639,7 +1638,7 @@ mpio_read_subarrays(hid_t       fd,
     int j, d, mpi_err;
     herr_t  err;
     hid_t   dset;
-    ssize_t buf_len, zip_len=0, read_len=0;
+    ssize_t buf_len, zip_len, read_len=0;
     unsigned char *whole_chunk;
     double timing;
 
@@ -1706,6 +1705,7 @@ mpio_read_subarrays(hid_t       fd,
         int is_mono_nondecr = 1;
         offset[0] = (lower / chunk_dims[0]) * chunk_dims[0];
         offset[1] = 0;
+        zip_len = 0;
         for (j=0; j<nChunks; j++) {
             hsize_t size;
             haddr_t addr;
