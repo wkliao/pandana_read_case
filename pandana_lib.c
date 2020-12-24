@@ -71,81 +71,6 @@ get_timings(double t[NUM_TIMERS])
     for (i=0; i<NUM_TIMERS; i++) t[i] = timings[i];
 }
 
-/*----< posix_read_dataset_by_ID() >-----------------------------------------*/
-/* Call POSIX read to read an entire dataset, decompress it, and copy to user
- * buffer
- */
-static ssize_t
-posix_read_dataset_by_ID(hid_t  dset,      /* HDF5 dataset ID */
-                         int    posix_fd,  /* POSIX file descriptor */
-                         void  *buf)       /* OUT: user buffer */
-{
-    int j;
-    ssize_t read_len=0;
-    herr_t err;
-    hsize_t dims[2], chunk_dims[2];
-    size_t dtype_size;
-
-    inq_dset_meta(dset, &dtype_size, dims, chunk_dims);
-
-    /* find the number of chunks to be read by this process */
-    size_t nChunks = dims[0] / chunk_dims[0];
-    if (dims[0] % chunk_dims[0]) nChunks++;
-
-    read_len += dims[0] * dims[1] * dtype_size;
-
-    size_t chunk_size = chunk_dims[0] * dtype_size;
-    unsigned char *zipBuf;
-    zipBuf = (unsigned char*) malloc(chunk_size);
-    if (zipBuf == NULL) CHECK_ERROR(-1, "malloc");
-
-    /* the last chunk may be of size less than chunk_dims[0] */
-    size_t last_chunk_len = dims[0] % chunk_dims[0];
-    if (last_chunk_len == 0) last_chunk_len = chunk_dims[0];
-    last_chunk_len *= dtype_size;
-
-    /* read compressed chunks, one at a time, into zipBuf, decompress it
-     * into buf
-     */
-    hsize_t offset[2]={0,0};
-    unsigned char *buf_ptr = buf;
-    for (j=0; j<nChunks; j++) {
-        haddr_t addr;
-        hsize_t size;
-
-        err = H5Dget_chunk_info_by_coord(dset, offset, NULL, &addr, &size);
-        if (err < 0) CHECK_ERROR(err, "H5Dget_chunk_info_by_coord");
-
-        lseek(posix_fd, addr, SEEK_SET);
-        ssize_t len = read(posix_fd, zipBuf, size);
-        if (len != size) CHECK_ERROR(-1, "read len != size");
-
-        double timing = MPI_Wtime();
-        int ret;
-        z_stream z_strm;
-        z_strm.zalloc    = Z_NULL;
-        z_strm.zfree     = Z_NULL;
-        z_strm.opaque    = Z_NULL;
-        z_strm.avail_in  = size;
-        z_strm.next_in   = zipBuf;
-        z_strm.avail_out = (j == nChunks-1) ? last_chunk_len : chunk_size;
-        z_strm.next_out  = buf_ptr;
-        ret = inflateInit(&z_strm);
-        if (ret != Z_OK) CHECK_ERROR(-1, "inflateInit");
-        ret = inflate(&z_strm, Z_SYNC_FLUSH);
-        if (ret != Z_OK && ret != Z_STREAM_END) CHECK_ERROR(-1, "inflate");
-        ret = inflateEnd(&z_strm);
-        if (ret != Z_OK) CHECK_ERROR(-1, "inflateEnd");
-
-        offset[0] += chunk_dims[0];
-        buf_ptr += chunk_size;
-        inflate_t += MPI_Wtime() - timing;
-    }
-    free(zipBuf);
-
-    return read_len;
-}
-
 static ssize_t
 hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
                   hid_t      fd,         /* HDF5 file ID */
@@ -399,13 +324,12 @@ pandana_posix_read_dset(hid_t  dset,      /* HDF5 dataset ID */
     for (j=0; j<nChunks; j++) {
         haddr_t addr;
         hsize_t size;
-        ssize_t len;
 
         err = H5Dget_chunk_info_by_coord(dset, offset, NULL, &addr, &size);
         if (err < 0) CHECK_ERROR(err, "H5Dget_chunk_info_by_coord");
 
         lseek(posix_fd, addr, SEEK_SET);
-        len = read(posix_fd, zipBuf, size);
+        ssize_t len = read(posix_fd, zipBuf, size);
         if (len != size) CHECK_ERROR(-1, "read len != size");
 
 #ifdef PANDANA_BENCHMARK
@@ -968,7 +892,7 @@ pandana_mpi_read_subarrays(hid_t        fd,         /* HDF5 file descriptor */
 {
     int j, d, mpi_err;
     herr_t  err;
-    ssize_t zip_len=0, read_len=0;
+    ssize_t zip_len, read_len=0;
     unsigned char **buf_ptr = (unsigned char**) buf;
 
     for (d=0; d<nDatasets; d++) {
@@ -999,6 +923,7 @@ pandana_mpi_read_subarrays(hid_t        fd,         /* HDF5 file descriptor */
         hsize_t offset[2];
         offset[0] = (lower / chunk_dims[0]) * chunk_dims[0];
         offset[1] = 0;
+        zip_len = 0;
         for (j=0; j<nChunks; j++) {
             hsize_t size;
             haddr_t addr;
@@ -1138,12 +1063,12 @@ pandana_mpi_read_subarrays_aggr(hid_t         fd,        /* HDF5 file descriptor
                                 hsize_t       upper,     /* upper bound */
                                 void        **buf)       /* [nDatasets] user read buffer */
 {
-    int d, j, k, zip_len=0, mpi_err;
+    int d, j, k, mpi_err;
     herr_t  err;
     hsize_t **size;
     haddr_t **addr;
     size_t all_nChunks=0, *nChunks, max_chunk_size=0, *dtype_size;
-    ssize_t read_len=0;
+    ssize_t zip_len=0, read_len=0;
     unsigned char **buf_ptr = (unsigned char**) buf;
 
     dtype_size = (size_t*) malloc(nDatasets * 2 * sizeof(size_t));
@@ -1554,8 +1479,8 @@ else if (seq_opt == 4) {
         void *seqBuf = (void*) malloc(buf_len);
         if (seqBuf == NULL) CHECK_ERROR(-1, "malloc");
 
-        /* posix_read_dataset_by_ID() is an independent call */
-        read_len += posix_read_dataset_by_ID(dset, posix_fd, seqBuf);
+        /* pandana_posix_read_dset() is an independent call */
+        read_len += pandana_posix_read_dset(dset, posix_fd, seqBuf);
 
         /* calculate lower and upper bounds for all processes */
         for (k=0, p=0; p<nprocs; p++) {
