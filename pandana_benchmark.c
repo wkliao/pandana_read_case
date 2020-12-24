@@ -172,8 +172,16 @@ chunk_statistics(MPI_Comm    comm,
     if (rank == 0)
         printf("Number of unique IDs (size of /spill/evt.seq)=%lld\n",numIDs);
 
+#ifdef PANDANA_BENCHMARK
     extern void set_options(int seq_read_opt, int dset_read_opt);
     set_options(2, 0);
+
+    MPI_File fh = MPI_FILE_NULL;
+#else
+    MPI_File fh;
+    int mpi_err = MPI_File_open(comm, infile, MPI_MODE_RDONLY, MPI_INFO_NULL, &fh);
+    if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_open");
+#endif
 
     /* collect statistics describing chunk contention */
     fd = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
@@ -190,7 +198,7 @@ chunk_statistics(MPI_Comm    comm,
         key_names[g] = groups[g].dset_names[0];
 
     /* calculate this process's lowers[] and uppers[] for all groups */
-    pandana_read_keys(MPI_COMM_WORLD, fd, MPI_FILE_NULL, nGroups, key_names,
+    pandana_read_keys(MPI_COMM_WORLD, fd, fh, nGroups, key_names,
                       numIDs, lowers, uppers);
     free(key_names);
 
@@ -370,6 +378,11 @@ chunk_statistics(MPI_Comm    comm,
     H5Fclose(fd);
     free(lowers);
     free(bounds);
+
+#ifndef PANDANA_BENCHMARK
+    mpi_err = MPI_File_close(&fh);
+    if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_close");
+#endif
 
     MPI_Allreduce(&my_nchunks_read, &aggr_nchunks_read, 1, MPI_LONG_LONG,
                   MPI_SUM, comm);
@@ -554,7 +567,9 @@ int main(int argc, char **argv)
         printf("Number of datasets to read = %d\n", nDatasets);
         printf("MAX/MIN no. datasets per group = %d / %d\n", max_nDatasets, min_nDatasets);
         printf("Read key   datasets method: ");
-        if (seq_opt == 0)
+        if (parallelism == 2)
+            printf("skipped\n");
+        else if (seq_opt == 0)
             printf("root process H5Dread and broadcasts\n");
         else if (seq_opt == 1)
             printf("all processes H5Dread collectively\n");
@@ -566,8 +581,10 @@ int main(int argc, char **argv)
             printf("Distributed POSIX read, decompress, and scatters boundaries\n");
 
         printf("Read other datasets method: ");
-        if (dset_opt == 0)
-            printf("H5Dread, one dataset at a time\n");
+        if (parallelism == 2)
+            printf("Independent H5Dread, one dataset by one process\n");
+        else if (dset_opt == 0)
+            printf("Collective H5Dread, one dataset at a time\n");
         else if (dset_opt == 1)
             printf("MPI collective read and decompress, one dataset at a time\n");
         else if (dset_opt == 2)
@@ -583,11 +600,13 @@ int main(int argc, char **argv)
     }
     fflush(stdout);
 
+#ifdef PANDANA_BENCHMARK
     extern void set_options(int seq_read_opt, int dset_read_opt);
     set_options(seq_opt, dset_opt);
 
     extern void init_timers(void);
     init_timers();
+#endif
 
     MPI_Barrier(MPI_COMM_WORLD);
     all_t = MPI_Wtime();
@@ -629,8 +648,13 @@ int main(int argc, char **argv)
         read_len = pandana_dataset_parallelism(MPI_COMM_WORLD, infile, nGroups,
                                     groups);
 
+#ifdef PANDANA_BENCHMARK
     timings[5] = MPI_Wtime() - all_t;
+#else
+    all_t = MPI_Wtime() - all_t;
+#endif
 
+#ifdef PANDANA_BENCHMARK
     extern void get_timings(double*);
     get_timings(timings);
 
@@ -644,6 +668,10 @@ int main(int argc, char **argv)
      */
     MPI_Reduce(timings, max_t, 6, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(timings, min_t, 6, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
+#else
+    MPI_Reduce(&all_t, max_t, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&all_t, min_t, 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
+#endif
 
     long long max_read_len, min_read_len;
     MPI_Reduce(&read_len, &max_read_len, 1, MPI_LONG_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
@@ -656,10 +684,15 @@ int main(int argc, char **argv)
                (float)max_read_len/1048576.0, (float)max_read_len/1073741824.0);
         printf("MIN read amount: %.2f MiB (%.2f GiB)\n",(
                float)min_read_len/1048576.0, (float)min_read_len/1073741824.0);
+#ifdef PANDANA_BENCHMARK
         printf("MAX time: open=%.2f key=%.2f datasets=%.2f close=%.2f inflate=%.2f TOTAL=%.2f\n",
                max_t[0],max_t[1],max_t[2],max_t[3],max_t[4],max_t[5]);
         printf("MIN time: open=%.2f key=%.2f datasets=%.2f close=%.2f inflate=%.2f TOTAL=%.2f\n",
                min_t[0],min_t[1],min_t[2],min_t[3],min_t[4],min_t[5]);
+#else
+        printf("MAX end-to-end time %.2f seconds\n", max_t[0]);
+        printf("MIN end-to-end time %.2f seconds\n", min_t[0]);
+#endif
         printf("----------------------------------------------------\n");
     }
     fflush(stdout);

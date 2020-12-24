@@ -7,14 +7,14 @@ CFLAGS   = $(OPTS) $(CPPFLAGS)
 LDFLAGS  = -L$(HDF5_DIR)/lib
 LIBS     = -ldl -lz -lhdf5
 
-all: pandana_read print_dsets pandana_lib.a pandana_benchmark
+all: pandana_read print_dsets libpandana.a pandana_benchmark
 
 pandana_lib.o: pandana_lib.c pandana_lib.h
 	$(MPICC) $(CFLAGS) -c -o $@ $<
 
-pandana_lib.a: pandana_lib.o
-	ar cru pandana_lib.a pandana_lib.o
-	ranlib pandana_lib.a
+libpandana.a: pandana_lib.o
+	ar cru libpandana.a pandana_lib.o
+	ranlib libpandana.a
 
 pandana_benchmark: pandana_benchmark.c pandana_lib.c pandana_lib.h
 	$(MPICC) -DPANDANA_BENCHMARK $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
@@ -26,6 +26,6 @@ print_dsets: print_dsets.c
 	$(MPICC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LIBS)
 
 clean:
-	rm -rf *.o core* pandana_lib.a
+	rm -rf *.o core* libpandana.a
 	rm -rf pandana_read print_dsets pandana_benchmark
 
