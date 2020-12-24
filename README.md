@@ -91,8 +91,12 @@ parallelism, task parallelism, and maybe a combinations of the two.
     occur simultaneously.
 * **Dataset Parallelism** - All datasets, except key datasets, in all groups
   are evenly assigned to the MPI processes. One dataset is read entirely by a
-  process only. Each process is responsible to read the assigned dataset. In
-  this case, only HDF5 read is called.
+  process only. Each process is responsible to read the assigned dataset.
+  + Only HDF5 H5Dread() is called.
+  + Reading the key datasets is skipped, as there is no need of those datasets.
+  + The degree of parallelism is limited to the number of datasets . When
+    running more processes than the datasets, some processes may have no
+    dataset to read.
 
 ### Run Command usage:
   ```
