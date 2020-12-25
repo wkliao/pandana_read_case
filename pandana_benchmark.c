@@ -613,30 +613,32 @@ int main(int argc, char **argv)
 
     char *dset_global_ID = "/spill/evt.seq";
 
-    /* Inquire number of globally unique IDs (size of dset_global_ID) */
-    herr_t err;
-    hid_t fd = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
-    if (fd < 0) {
-        fprintf(stderr,"%d: Error: fail to open file %s (%s)\n",
-                rank,  infile, strerror(errno));
-        goto fn_exit;
+    if (parallelism < 2) { /* data and group parallelism only */
+        /* Inquire number of globally unique IDs (size of dset_global_ID) */
+        herr_t err;
+        hid_t fd = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
+        if (fd < 0) {
+            fprintf(stderr,"%d: Error: fail to open file %s (%s)\n",
+                    rank,  infile, strerror(errno));
+            goto fn_exit;
+        }
+        hid_t dset = H5Dopen2(fd, dset_global_ID, H5P_DEFAULT);
+        if (dset < 0) CHECK_ERROR(seq, "H5Dopen2");
+        hid_t fspace = H5Dget_space(dset);
+        if (fspace < 0) CHECK_ERROR(dset, "H5Dget_space");
+        hsize_t dims[2];
+        err = H5Sget_simple_extent_dims(fspace, dims, NULL);
+        if (err < 0) CHECK_ERROR(err, "H5Sget_simple_extent_dims");
+        err = H5Sclose(fspace);
+        if (err < 0) CHECK_ERROR(err, "H5Sclose");
+        /* 2nd dimension of global ID dataset is always 1 */
+        if (dims[1] != 1) CHECK_ERROR(-1, "dims[1] != 1");
+        err = H5Dclose(dset);
+        if (err < 0) CHECK_ERROR(err, "H5Dclose");
+        numIDs = dims[0];
+        err = H5Fclose(fd);
+        if (err < 0) CHECK_ERROR(err, "H5Fclose");
     }
-    hid_t dset = H5Dopen2(fd, dset_global_ID, H5P_DEFAULT);
-    if (dset < 0) CHECK_ERROR(seq, "H5Dopen2");
-    hid_t fspace = H5Dget_space(dset);
-    if (fspace < 0) CHECK_ERROR(dset, "H5Dget_space");
-    hsize_t dims[2];
-    err = H5Sget_simple_extent_dims(fspace, dims, NULL);
-    if (err < 0) CHECK_ERROR(err, "H5Sget_simple_extent_dims");
-    err = H5Sclose(fspace);
-    if (err < 0) CHECK_ERROR(err, "H5Sclose");
-    /* 2nd dimension of global ID dataset is always 1 */
-    if (dims[1] != 1) CHECK_ERROR(-1, "dims[1] != 1");
-    err = H5Dclose(dset);
-    if (err < 0) CHECK_ERROR(err, "H5Dclose");
-    numIDs = dims[0];
-    err = H5Fclose(fd);
-    if (err < 0) CHECK_ERROR(err, "H5Fclose");
 
     if (parallelism == 0) /* data parallelism */
         read_len = pandana_data_parallelism(MPI_COMM_WORLD, infile, nGroups,
