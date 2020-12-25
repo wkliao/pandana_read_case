@@ -20,12 +20,9 @@ pandana_posix_read_dset(hid_t  dset,      /* HDF5 dataset ID */
                         void  *buf);      /* OUT: user buffer */
 
 ssize_t
-pandana_mpi_read_dsets(MPI_Comm   comm,      /* MPI communicator */
-                       hid_t      fd,        /* HDF5 file ID */
-                       MPI_File   fh,        /* MPI file handler */
-                       int        nDatasets, /* number of datasets */
-                       hid_t     *dsets,     /* IN:  [nDatasets] dataset IDs */
-                       void     **buf);      /* OUT: [nDatasets] read buffers */
+pandana_hdf5_read_dset(hid_t  fd,    /* HDF5 file descriptor */
+                       hid_t  dset,  /* dataset ID */
+                       void  *buf);  /* user read buffer */
 ssize_t
 pandana_hdf5_read_subarray(hid_t    fd,         /* HDF5 file descriptor */
                            hid_t    dset,       /* dataset ID */
@@ -41,6 +38,13 @@ pandana_hdf5_read_subarrays(hid_t        fd,        /* HDF5 file ID */
                             hsize_t      upper,     /* upper bound */
                             hid_t        xfer_plist,/* data transfer property */
                             void       **buf);      /* [nDatasets] user buffer */
+ssize_t
+pandana_mpi_read_dsets(MPI_Comm   comm,      /* MPI communicator */
+                       hid_t      fd,        /* HDF5 file ID */
+                       MPI_File   fh,        /* MPI file handler */
+                       int        nDatasets, /* number of datasets */
+                       hid_t     *dsets,     /* IN:  [nDatasets] dataset IDs */
+                       void     **buf);      /* OUT: [nDatasets] read buffers */
 ssize_t
 pandana_mpi_read_subarray(hid_t          fd,     /* HDF5 file descriptor */
                           MPI_File       fh,     /* MPI file handler */

@@ -151,7 +151,6 @@ chunk_statistics(MPI_Comm    comm,
                  const char *infile,
                  NOvA_group *groups,
                  int         nGroups,
-                 long long   numIDs,
                  int         seq_opt)
 {
     herr_t  err;
@@ -163,14 +162,11 @@ chunk_statistics(MPI_Comm    comm,
     long long aggr_nchunks_read, my_nchunks_read=0, my_nchunks_read_nokeys=0;
     long long all_dset_size, all_evt_seq_size;
     long long all_dset_size_z, all_evt_seq_size_z;
-    long long maxRead=0, minRead=LONG_MAX;
+    long long numIDs, maxRead=0, minRead=LONG_MAX;
     size_t *grp_sizes, *grp_zip_sizes, *grp_nChunks, **nChunks;
 
     MPI_Comm_size(comm, &nprocs);
     MPI_Comm_rank(comm, &rank);
-
-    if (rank == 0)
-        printf("Number of unique IDs (size of /spill/evt.seq)=%lld\n",numIDs);
 
 #ifdef PANDANA_BENCHMARK
     extern void set_options(int seq_read_opt, int dset_read_opt);
@@ -185,6 +181,18 @@ chunk_statistics(MPI_Comm    comm,
 
     /* collect statistics describing chunk contention */
     fd = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
+
+    /* Inquire number of globally unique IDs (size of dset_global_ID) */
+    dset = H5Dopen2(fd, "/spill/evt.seq", H5P_DEFAULT);
+    hid_t fspace = H5Dget_space(dset);
+    hsize_t dims[2];
+    err = H5Sget_simple_extent_dims(fspace, dims, NULL);
+    err = H5Sclose(fspace);
+    err = H5Dclose(dset);
+    numIDs = dims[0];
+
+    if (rank == 0)
+        printf("Number of unique IDs (size of /spill/evt.seq)=%lld\n",numIDs);
 
     /* calculate this process's responsible array index range (lower and upper
      * bounds) for each group */
@@ -701,7 +709,7 @@ int main(int argc, char **argv)
     MPI_Barrier(MPI_COMM_WORLD);
 
     if (profile)
-        chunk_statistics(MPI_COMM_WORLD, infile, groups, nGroups, numIDs, seq_opt);
+        chunk_statistics(MPI_COMM_WORLD, infile, groups, nGroups, seq_opt);
 
 fn_exit:
     if (groups != NULL) {

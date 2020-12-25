@@ -162,9 +162,10 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
             err = H5Dread(dset, H5T_STD_I64LE, H5S_ALL, H5S_ALL, xfer_plist,
                           seqBuf);
             /* all processes independently reads the whole dataset is even
-             * worse */
-            // err = H5Dread(dset, H5T_STD_I64LE, H5S_ALL, H5S_ALL,
-            // H5P_DEFAULT, seqBuf);
+             * worse.
+             * err = H5Dread(dset, H5T_STD_I64LE, H5S_ALL, H5S_ALL,
+             *               H5P_DEFAULT, seqBuf);
+             */
             if (err < 0) CHECK_ERROR(err, "H5Dread");
             read_len += buf_len;
 
@@ -315,8 +316,8 @@ pandana_posix_read_dset(hid_t  dset,      /* HDF5 dataset ID */
     if (last_chunk_len == 0) last_chunk_len = chunk_dims[0];
     last_chunk_len *= dtype_size;
 
-    /* read compressed chunks, one at a time, into zipBuf, decompress it
-     * into buf
+    /* read compressed chunks, one at a time, into zipBuf, decompress it into
+     * buf
      */
     hsize_t offset[2]={0,0};
     unsigned char *buf_ptr = buf;
@@ -368,12 +369,12 @@ pandana_posix_read_dset(hid_t  dset,      /* HDF5 dataset ID */
  * chunks. This is a collective call.
  */
 ssize_t
-pandana_mpi_read_dsets(MPI_Comm    comm,       /* MPI communicator */
-                       hid_t       fd,         /* HDF5 file ID */
-                       MPI_File    fh,         /* MPI file handler */
-                       int         nDatasets,  /* number of datasets */
-                       hid_t      *dsets,      /* IN:  [nDatasets] dataset IDs */
-                       void      **buf)        /* OUT: [nDatasets] read buffers */
+pandana_mpi_read_dsets(MPI_Comm    comm,     /* MPI communicator */
+                       hid_t       fd,       /* HDF5 file ID */
+                       MPI_File    fh,       /* MPI file handler */
+                       int         nDatasets,/* number of datasets */
+                       hid_t      *dsets,    /* IN:  [nDatasets] dataset IDs */
+                       void      **buf)      /* OUT: [nDatasets] read buffers */
 {
     int c, d, j, k, mpi_err;
     herr_t err;
@@ -444,8 +445,8 @@ pandana_mpi_read_dsets(MPI_Comm    comm,       /* MPI communicator */
         if (size[d] == NULL) CHECK_ERROR(-1, "malloc");
         hsize_t offset[2]={0,0};
         for (j=0; j<nChunks[d]; j++) {
-            err = H5Dget_chunk_info_by_coord(dsets[d], offset, NULL, &addr[d][j],
-                                             &size[d][j]);
+            err = H5Dget_chunk_info_by_coord(dsets[d], offset, NULL,
+                                             &addr[d][j], &size[d][j]);
             if (err < 0) CHECK_ERROR(err, "H5Dget_chunk_info_by_coord");
             zip_len += size[d][j];
             offset[0] += chunk_dims[d][0];
@@ -555,7 +556,8 @@ pandana_mpi_read_dsets(MPI_Comm    comm,       /* MPI communicator */
         size_t len = chunk_dims[d][0] * dtype_size[d];
         size_t off = len * c;
         size_t last_len = dims[d][0] % chunk_dims[d][0];
-        if (c == nChunks[d] - 1 && last_len > 0) /* last chunk size may not be a whole chunk */
+        if (c == nChunks[d] - 1 && last_len > 0)
+            /* last chunk size may not be a whole chunk */
             len = last_len * dtype_size[d];
         memcpy((unsigned char*)buf[d] + off, chunkBuf, len);
         zipBuf_ptr += disp_indx[j].block_len;
@@ -675,7 +677,7 @@ pandana_hdf5_read_subarrays(hid_t        fd,         /* HDF5 file ID */
                             hsize_t      lower,      /* lower bound */
                             hsize_t      upper,      /* upper bound */
                             hid_t        xfer_plist, /* data transfer property */
-                            void       **buf)        /* [nDatasets] user read buffer */
+                            void       **buf)        /* [nDatasets] read buffer */
 {
     int d ;
     herr_t err;
@@ -743,12 +745,12 @@ pandana_hdf5_read_subarrays(hid_t        fd,         /* HDF5 file ID */
  * requested data to user buffer.
  */
 ssize_t
-pandana_mpi_read_subarray(hid_t          fd,         /* HDF5 file descriptor */
-                          MPI_File       fh,         /* MPI file handler */
-                          const hid_t    dset,       /* dataset ID */
-                          hsize_t        lower,      /* array index lower bound */
-                          hsize_t        upper,      /* array index upper bound */
-                          unsigned char *buf)        /* user read buffer */
+pandana_mpi_read_subarray(hid_t          fd,    /* HDF5 file descriptor */
+                          MPI_File       fh,    /* MPI file handler */
+                          const hid_t    dset,  /* dataset ID */
+                          hsize_t        lower, /* array index lower bound */
+                          hsize_t        upper, /* array index upper bound */
+                          unsigned char *buf)   /* user read buffer */
 {
     int j, mpi_err;
     size_t dtype_size;
@@ -911,13 +913,13 @@ pandana_mpi_read_subarray(hid_t          fd,         /* HDF5 file descriptor */
  * decompressed into user buffers
  */
 ssize_t
-pandana_mpi_read_subarrays(hid_t        fd,         /* HDF5 file descriptor */
-                          MPI_File      fh,         /* MPI file handler */
-                          int           nDatasets,  /* number of datasets */
-                          const hid_t  *dsets,      /* [nDatasets] dataset IDs */
-                          hsize_t       lower,      /* array index lower bound */
-                          hsize_t       upper,      /* array index upper bound */
-                          void        **buf)        /* [nDatasets] user read buffer */
+pandana_mpi_read_subarrays(hid_t        fd,        /* HDF5 file descriptor */
+                          MPI_File      fh,        /* MPI file handler */
+                          int           nDatasets, /* number of datasets */
+                          const hid_t  *dsets,     /* [nDatasets] dataset IDs */
+                          hsize_t       lower,     /* array index lower bound */
+                          hsize_t       upper,     /* array index upper bound */
+                          void        **buf)       /* [nDatasets] read buffer */
 {
     int j, d, mpi_err;
     herr_t  err;
@@ -1090,7 +1092,7 @@ pandana_mpi_read_subarrays_aggr(hid_t         fd,        /* HDF5 file descriptor
                                 const hid_t  *dsets,     /* [nDatasets] dataset IDs */
                                 hsize_t       lower,     /* lower bound */
                                 hsize_t       upper,     /* upper bound */
-                                void        **buf)       /* [nDatasets] user read buffer */
+                                void        **buf)       /* [nDatasets] read buffer */
 {
     int d, j, k, mpi_err;
     herr_t  err;
@@ -1151,8 +1153,8 @@ pandana_mpi_read_subarrays_aggr(hid_t         fd,        /* HDF5 file descriptor
         if (size[d] == NULL) CHECK_ERROR(-1, "malloc");
         hsize_t offset[2]={0, 0};
         for (j=0; j<nChunks[d]; j++) {
-            err = H5Dget_chunk_info_by_coord(dsets[d], offset, NULL, &addr[d][j],
-                                             &size[d][j]);
+            err = H5Dget_chunk_info_by_coord(dsets[d], offset, NULL,
+                                             &addr[d][j], &size[d][j]);
             if (err < 0) CHECK_ERROR(err, "H5Dget_chunk_info_by_coord");
             zip_len += size[d][j];
             offset[0] += chunk_dims[d][0];
