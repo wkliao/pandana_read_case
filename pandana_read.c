@@ -1913,7 +1913,9 @@ mpio_read_subarrays_aggr(hid_t       fd,
         if (addr[d] == NULL) CHECK_ERROR(-1, "malloc");
         size[d] = (hsize_t*) malloc(group->nChunks[d] * sizeof(hsize_t));
         if (size[d] == NULL) CHECK_ERROR(-1, "malloc");
-        hsize_t offset[2]={0, 0};
+        hsize_t offset[2];
+        offset[0] = (lower / chunk_dims[0]) * chunk_dims[0];
+        offset[1] = 0;
         for (j=0; j<group->nChunks[d]; j++) {
             err = H5Dget_chunk_info_by_coord(dset, offset, NULL, &addr[d][j],
                                              &size[d][j]);

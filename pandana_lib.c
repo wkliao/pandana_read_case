@@ -1151,7 +1151,9 @@ pandana_mpi_read_subarrays_aggr(hid_t         fd,        /* HDF5 file descriptor
         if (addr[d] == NULL) CHECK_ERROR(-1, "malloc");
         size[d] = (hsize_t*) malloc(nChunks[d] * sizeof(hsize_t));
         if (size[d] == NULL) CHECK_ERROR(-1, "malloc");
-        hsize_t offset[2]={0, 0};
+        hsize_t offset[2];
+        offset[0] = (lower / chunk_dims[d][0]) * chunk_dims[d][0];
+        offset[1] = 0;
         for (j=0; j<nChunks[d]; j++) {
             err = H5Dget_chunk_info_by_coord(dsets[d], offset, NULL,
                                              &addr[d][j], &size[d][j]);
