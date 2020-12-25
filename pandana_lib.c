@@ -1821,7 +1821,7 @@ pandana_dataset_parallelism(MPI_Comm    comm,     /* MPI communicator */
                             int         nGroups,  /* number of groups */
                             NOvA_group *groups)   /* array of group objects */
 {
-    int j, d, g, nprocs, rank, nDatasets, my_startDset, my_nDatasets;
+    int j, d, g, k, nprocs, rank, nDatasets, my_startDset, my_nDatasets;
     ssize_t read_len=0;
     herr_t err;
 
@@ -1855,13 +1855,6 @@ pandana_dataset_parallelism(MPI_Comm    comm,     /* MPI communicator */
     for (g=0; g<nGroups; g++)
         nDatasets += groups[g].nDatasets - 1;
 
-    /* construct a list of key dataset names */
-    char **key_names = (char**) malloc(nDatasets * sizeof(char*));
-    j = 0;
-    for (g=0; g<nGroups; g++)
-        for (d=1; d<groups[g].nDatasets; d++) /* skip key dataset */
-            key_names[j++] = groups[g].dset_names[d];
-
     /* Divide all datasets evenly among processes. Calculate the starting index
      * and the number of assigned datasets for this process. */
     my_nDatasets = nDatasets / nprocs;
@@ -1873,11 +1866,22 @@ pandana_dataset_parallelism(MPI_Comm    comm,     /* MPI communicator */
     else
         my_startDset += nDatasets % nprocs;
 
+    /* construct a list of key dataset names */
+    char **key_names = (char**) malloc(my_nDatasets * sizeof(char*));
+    j = 0;
+    k = 0;
+    for (g=0; g<nGroups; g++)
+        for (d=1; d<groups[g].nDatasets; d++) { /* skip key dataset */
+            if (j >= my_startDset && j < my_startDset + my_nDatasets)
+                key_names[k++] = groups[g].dset_names[d];
+            j++;
+        }
+
     /* allocate an array of buffer pointers */
     void **buf = (void**) malloc(my_nDatasets * sizeof(void*));
 
     for (d=0; d<my_nDatasets; d++) {
-        hid_t dset = H5Dopen2(fd, key_names[my_startDset+d], H5P_DEFAULT);
+        hid_t dset = H5Dopen2(fd, key_names[d], H5P_DEFAULT);
         if (dset < 0) CHECK_ERROR(dset, "H5Dopen2");
 
         /* inquire dimension sizes of dset */
@@ -1916,7 +1920,7 @@ pandana_dataset_parallelism(MPI_Comm    comm,     /* MPI communicator */
      * interest from the read buffers
      */
 
-    // printf("%d %s my_startDset=%d my_nDatasets=%d read_len=%.2f MiB\n",rank,__func__,my_startDset,my_nDatasets,(float)read_len/1048576.0);
+    // printf("%d %s my_startDset=%d my_nDatasets=%d read_len=%.2f MiB key[0]=%s\n",rank,__func__,my_startDset,my_nDatasets,(float)read_len/1048576.0,key_names[0]);
 
     /* free read buffers */
     for (d=0; d<my_nDatasets; d++) free(buf[d]);
