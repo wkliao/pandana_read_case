@@ -71,6 +71,17 @@ get_timings(double t[NUM_TIMERS])
     for (i=0; i<NUM_TIMERS; i++) t[i] = timings[i];
 }
 
+/*----< hdf5_read_keys() >---------------------------------------------------*/
+/* Using H5Dread to read key datasets. It includes 3 user-selectable methods.
+ * seq_opt == 0: root reads the whole key dataset and broadcasts it. Then each
+ *               process calculates the array index range (lower and upper
+ *               bound indices) responsible by itself.
+ * seq_opt == 1: All processes collectively read the key dataset, and then each
+ *               calculates the array index range (lower and upper bound
+ *               indices) responsible by itself.
+ * seq_opt == 2: root reads key dataset and calculates the array index range
+ *               (lower and upper bound indices) responsible by all processes
+ */
 static ssize_t
 hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
                hid_t      fd,         /* HDF5 file ID */
@@ -667,8 +678,18 @@ pandana_hdf5_read_subarray(hid_t    fd,         /* HDF5 file descriptor */
 }
 
 /*----< pandana_hdf5_read_keys_align() >-------------------------------------*/
-/* Call H5Dread to read subarrays of MULTIPLE datasets, one subarray at a time.
- * The hyperslab is required to be the same for all datasets.
+/* Distribute reading of key datasets among available processes and call
+ * H5Dread to read the assigned key datasets in whole. All processes calculate
+ * its array index boundaries into lowers[] and uppers[].  Processes with key
+ * datasets assigned calculate the numbers of elements for each process rank to
+ * be received from its immediately previous process into nRecvs[] and sent to
+ * successive process into nSends[]. nRecvs[] is the number of elements read by
+ * the immediately previous process that have the same key value of the first
+ * element read by this process. In this case, we move those elements from
+ * previous process to this process.  nSends[] is the number of elements to be
+ * sent to the immediately successive process.  This strategy lets array
+ * elements with the same key values to be partitioned into the same processes.
+ * nRecvs[] and nSends[] are then MPI scatter-ed to all other processes.
  */
 ssize_t
 pandana_hdf5_read_keys_align(MPI_Comm   comm,
@@ -872,7 +893,10 @@ pandana_hdf5_read_keys_align(MPI_Comm   comm,
 
 /*----< pandana_hdf5_read_subarrays_align() >--------------------------------------*/
 /* Call H5Dread to read subarrays of MULTIPLE datasets, one subarray at a time.
- * The hyperslab is required to be the same for all datasets.
+ * The hyperslab is from lower bound to upper bound, which are aligned with the
+ * chunk boundaries. Once data is read, array elements at the beginning and end
+ * are exchanged between this process and the immediately previous process. The
+ * same for this process and immediately successive process.
  */
 ssize_t
 pandana_hdf5_read_subarrays_align(MPI_Comm     comm,

@@ -116,11 +116,15 @@ parallelism, task parallelism, and maybe a combinations of the two.
                       boundaries to other processes
                    4: root POSIX reads all chunks of keys, one dataset at a
                       time, decompress, and scatter boundaries
-    [-m number]    read method for other datasets (0, 1, or 2)
-                   0: use H5Dread (default)
-                   1: use MPI_file_read_all one dataset at a time
-                   2: use MPI_file_read_all to read all datasets in one group
-                      at a time
+    [-m number]    read method for other datasets (0, 1, 2, or 3)
+                   0: use H5Dread, one dataset at a time (default)
+                   1: use MPI_file_read_all, one dataset at a time
+                   2: use MPI_file_read_all, all datasets in one group at a
+                      time
+                   3: use chunk-aligned partitioning and H5Dread to read one
+                      dataset at a time. When used, -s argument is ignored.
+                      Reading key datasets are distributed using H5Dread, one
+                      dataset at a time.
     [-r number]    parallelization method (0 or 1)
                    0: data parallelism - all processes read each dataset in
                       parallel (default)

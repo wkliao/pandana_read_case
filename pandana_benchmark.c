@@ -464,12 +464,14 @@ usage(char *progname)
                  4: root POSIX reads all chunks of keys, one dataset at a\n\
                     time, decompress, and scatter boundaries\n\
   [-m number]    read method for other datasets (0, 1, 2, or 3)\n\
-                 0: use H5Dread (default)\n\
-                 1: use MPI_file_read_all one dataset at a time\n\
-                 2: use MPI_file_read_all to read all datasets in one group\n\
-                    at a time\n\
+                 0: use H5Dread, one dataset at a time (default)\n\
+                 1: use MPI_file_read_all, one dataset at a time\n\
+                 2: use MPI_file_read_all, all datasets in one group at a\n\
+                    time\n\
                  3: use chunk-aligned partitioning and H5Dread to read one\n\
-                    dataset at a time\n\
+                    dataset at a time. When used, -s argument is ignored.\n\
+                    Reading key datasets are distributed using H5Dread, one\n\
+                    dataset at a time.\n\
   [-r number]    parallelization method (0 or 1)\n\
                  0: data parallelism - all processes read each dataset in\n\
                     parallel (default)\n\
@@ -490,7 +492,7 @@ int main(int argc, char **argv)
     int seq_opt=0, dset_opt=0, profile=0;
     int c, d, g, nprocs, rank, nGroups, parallelism=0;
     char *listfile=NULL, *infile=NULL;
-    double all_t, timings[6], max_t[6], min_t[6];
+    double all_t, max_t[6], min_t[6];
     long long read_len, numIDs;
     NOvA_group *groups=NULL;
 
@@ -580,7 +582,7 @@ int main(int argc, char **argv)
         if (parallelism == 2)
             printf("skipped\n");
         if (dset_opt == 3)
-            printf("root process H5Dread and scatters aligned boundaries\n");
+            printf("Distributed H5Dread and scatters aligned boundaries\n");
         else if (seq_opt == 0)
             printf("root process H5Dread and broadcasts\n");
         else if (seq_opt == 1)
@@ -665,12 +667,9 @@ int main(int argc, char **argv)
                                     groups);
 
 #ifdef PANDANA_BENCHMARK
+    double timings[6];
     timings[5] = MPI_Wtime() - all_t;
-#else
-    all_t = MPI_Wtime() - all_t;
-#endif
 
-#ifdef PANDANA_BENCHMARK
     extern void get_timings(double*);
     get_timings(timings);
 
@@ -685,6 +684,7 @@ int main(int argc, char **argv)
     MPI_Reduce(timings, max_t, 6, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(timings, min_t, 6, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
 #else
+    all_t = MPI_Wtime() - all_t;
     MPI_Reduce(&all_t, max_t, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(&all_t, min_t, 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
 #endif
