@@ -463,11 +463,13 @@ usage(char *progname)
                     boundaries to other processes\n\
                  4: root POSIX reads all chunks of keys, one dataset at a\n\
                     time, decompress, and scatter boundaries\n\
-  [-m number]    read method for other datasets (0, 1, or 2)\n\
+  [-m number]    read method for other datasets (0, 1, 2, or 3)\n\
                  0: use H5Dread (default)\n\
                  1: use MPI_file_read_all one dataset at a time\n\
                  2: use MPI_file_read_all to read all datasets in one group\n\
                     at a time\n\
+                 3: use chunk-aligned partitioning and H5Dread to read one\n\
+                    dataset at a time\n\
   [-r number]    parallelization method (0 or 1)\n\
                  0: data parallelism - all processes read each dataset in\n\
                     parallel (default)\n\
@@ -537,9 +539,9 @@ int main(int argc, char **argv)
         }
         goto fn_exit;
     }
-    if (dset_opt < 0 || dset_opt > 2) { /* option for reading other datasets */
+    if (dset_opt < 0 || dset_opt > 3) { /* option for reading other datasets */
         if (rank  == 0) {
-            printf("Error: option -m must be 0, 1, or 2\n");
+            printf("Error: option -m must be 0, 1, 2, or 3\n");
             usage(argv[0]);
         }
         goto fn_exit;
@@ -577,6 +579,8 @@ int main(int argc, char **argv)
         printf("Read key   datasets method: ");
         if (parallelism == 2)
             printf("skipped\n");
+        if (dset_opt == 3)
+            printf("root process H5Dread and scatters aligned boundaries\n");
         else if (seq_opt == 0)
             printf("root process H5Dread and broadcasts\n");
         else if (seq_opt == 1)
@@ -597,6 +601,8 @@ int main(int argc, char **argv)
             printf("MPI collective read and decompress, one dataset at a time\n");
         else if (dset_opt == 2)
             printf("MPI collective read and decompress, all datasets in one group at a time\n");
+        else if (dset_opt == 3)
+            printf("Align data partitioning with chunk boundaries and call H5Dread to read in parallel\n");
 
         printf("Parallelization method: ");
         if (parallelism == 0)
