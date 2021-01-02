@@ -123,7 +123,8 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
             hsize_t dims[2], chunk_dims[2];
             size_t dtype_size;
             inq_dset_meta(dset, &dtype_size, dims, chunk_dims);
-            size_t buf_len = dims[0] * dims[1] * dtype_size;
+            if (dims[1] != 1) CHECK_ERROR(err, "dims[1] != 1");
+            size_t buf_len = dims[0] * dtype_size;
 
             /* rank 0 reads the whole key dataset and broadcasts it */
             int64_t *seqBuf = (int64_t*) malloc(buf_len);
@@ -166,7 +167,8 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
             hsize_t dims[2], chunk_dims[2];
             size_t dtype_size;
             inq_dset_meta(dset, &dtype_size, dims, chunk_dims);
-            size_t buf_len = dims[0] * dims[1] * dtype_size;
+            if (dims[1] != 1) CHECK_ERROR(err, "dims[1] != 1");
+            size_t buf_len = dims[0] * dtype_size;
             int64_t *seqBuf = (int64_t*) malloc(buf_len);
             if (seqBuf == NULL) CHECK_ERROR(-1, "malloc");
 
@@ -210,7 +212,8 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
                 hsize_t dims[2], chunk_dims[2];
                 size_t dtype_size;
                 inq_dset_meta(dset, &dtype_size, dims, chunk_dims);
-                size_t buf_len = dims[0] * dims[1] * dtype_size;
+                if (dims[1] != 1) CHECK_ERROR(err, "dims[1] != 1");
+                size_t buf_len = dims[0] * dtype_size;
 
                 int64_t *seqBuf = (int64_t*) malloc(buf_len);
                 if (seqBuf == NULL) CHECK_ERROR(-1, "malloc");
@@ -780,8 +783,8 @@ pandana_hdf5_read_keys_align(MPI_Comm   comm,
         else {
             lowers[g] = my_startChunk * chunk_dims[0];
             uppers[g] = (my_startChunk + my_nChunks) * chunk_dims[0] - 1;
+            uppers[g] = MIN(uppers[g], dims[0] - 1); /* last chunk may not be a full chunk */
         }
-        uppers[g] = MIN(uppers[g], dims[0] - 1); /* last chunk may not be a full chunk */
 
 // printf("g=%2d nChunks=%2d my_nChunks=%2d my_startChunk=%2d lowers=%zd upper=%zd chunk_dims[0]=%lld key=%s\n", g,nChunks,my_nChunks,my_startChunk,lowers[g],uppers[g],chunk_dims[0],keyNames[g]);
 // if(rank==0||rank==nprocs-1)  printf("%3d: g=%2d my_nKeys=%d nChunks=%2d my_nChunks=%2d my_startChunk=%2d key=%s\n", rank,g,my_nKeys,nChunks,my_nChunks,my_startChunk,keyNames[g]);
@@ -1809,8 +1812,9 @@ if (seq_opt == 3) {
         hsize_t dims[2];
         size_t dtype_size;
         inq_dset_meta(dsets[g], &dtype_size, dims, NULL);
+        if (dims[1] != 1) CHECK_ERROR(err, "dims[1] != 1");
         dim0[g] = dims[0];
-        size_t buf_len = dims[0] * dims[1] * dtype_size;
+        size_t buf_len = dims[0] * dtype_size;
         /* allocate read buffers */
         seqBuf[g] = (void*) malloc(buf_len);
         if (seqBuf[g] == NULL) CHECK_ERROR(-1, "malloc");
@@ -1844,7 +1848,8 @@ else if (seq_opt == 4) {
         hsize_t dims[2];
         size_t dtype_size;
         inq_dset_meta(dset, &dtype_size, dims, NULL);
-        size_t buf_len = dims[0] * dims[1] * dtype_size;
+        if (dims[1] != 1) CHECK_ERROR(err, "dims[1] != 1");
+        size_t buf_len = dims[0] * dtype_size;
         /* allocate read buffers */
         void *seqBuf = (void*) malloc(buf_len);
         if (seqBuf == NULL) CHECK_ERROR(-1, "malloc");
@@ -1989,7 +1994,8 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
     if (dset_opt == 3) {
         nRecvs = (int*) malloc(nGroups * 2 * sizeof(int));
         nSends = nRecvs + nGroups;
-        read_len += pandana_hdf5_read_keys_align(comm, fd, nGroups, key_names, lowers, uppers, nRecvs, nSends);
+        read_len += pandana_hdf5_read_keys_align(comm, fd, nGroups, key_names,
+                    lowers, uppers, nRecvs, nSends);
     }
     else
 #endif
@@ -2036,6 +2042,7 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
             size_t buf_len;
             buf_len = uppers[g] - lowers[g] + 1;
 #ifdef PANDANA_BENCHMARK
+            /* chunk-aligned method may receive additional elements from rank-1 */
             if (dset_opt == 3) buf_len += nRecvs[g];
 #endif
             buf_len *= dims[1] * dtype_size;
@@ -2055,7 +2062,8 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
         }
         else if (dset_opt == 3) {
             read_len += pandana_hdf5_read_subarrays_align(comm, fd, nDatasets,
-                        dsets, lowers[g], uppers[g], nRecvs[g], nSends[g], xfer_plist, buf);
+                        dsets, lowers[g], uppers[g], nRecvs[g], nSends[g],
+                        xfer_plist, buf);
             /* Updated data partitioning: this process is assigned array index
              * range from (lowers[g] - nRecvs[g]) till (uppers[g] - nSends[g])
              */
@@ -2226,7 +2234,8 @@ pandana_dataset_parallelism(MPI_Comm    comm,     /* MPI communicator */
         nDatasets += groups[g].nDatasets - 1;
 
     /* Divide all datasets evenly among processes. Calculate the starting index
-     * and the number of assigned datasets for this process. */
+     * and the number of assigned datasets for this process.
+     */
     my_nDatasets = nDatasets / nprocs;
     my_startDset = my_nDatasets * rank;
     if (rank < nDatasets % nprocs) {
