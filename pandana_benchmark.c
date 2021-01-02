@@ -629,7 +629,7 @@ int main(int argc, char **argv)
 
     char *dset_global_ID = "/spill/evt.seq";
 
-    if (parallelism < 2) { /* data and group parallelism only */
+    if (parallelism < 2 && dset_opt != 3) { /* data and group parallelism only */
         /* Inquire number of globally unique IDs (size of dset_global_ID) */
         herr_t err;
         hid_t fd = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
