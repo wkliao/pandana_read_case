@@ -556,6 +556,12 @@ int main(int argc, char **argv)
         goto fn_exit;
     }
 
+#ifndef PANDANA_BENCHMARK
+    /* When not in benchmark mode, use the options giving best performance */
+    seq_opt = 3;
+    dset_opt = 2;
+#endif
+
     /* From file 'listfile', read dataset names, calculate number of datasets,
      * number of groups, maximum number of datasets among groups
      */
@@ -578,6 +584,7 @@ int main(int argc, char **argv)
         printf("Number of groups   to read = %d\n", nGroups);
         printf("Number of datasets to read = %d\n", nDatasets);
         printf("MAX/MIN no. datasets per group = %d / %d\n", max_nDatasets, min_nDatasets);
+
         printf("Read key   datasets method: ");
         if (parallelism == 2)
             printf("skipped\n");
@@ -629,9 +636,16 @@ int main(int argc, char **argv)
 
     char *dset_global_ID = "/spill/evt.seq";
 
-    if (parallelism < 2 && dset_opt != 3) { /* data and group parallelism only */
-        /* Inquire number of globally unique IDs (size of dset_global_ID) */
-        herr_t err;
+#ifdef PANDANA_BENCHMARK
+    if (parallelism < 2 && dset_opt != 3)
+#else
+    if (parallelism < 2)
+#endif
+    {
+        /* Inquire number of globally unique IDs (size of dset_global_ID)
+	 * This is not required when using dataset parallelism or chunk-aligned
+	 * dataset option */
+	herr_t err;
         hid_t fd = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
         if (fd < 0) {
             fprintf(stderr,"%d: Error: fail to open file %s (%s)\n",
