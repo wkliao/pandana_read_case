@@ -73,6 +73,79 @@ Parallel reads consist of the following steps.
    the starting and ending indices (hyperslab), one dataset at a time.
    * Note reading index ranges are not overlapping among all processes.
 
+### Data partitioning strategies
+In general, data partitioning determines the parallel I/O performance. Evenly
+distributing the I/O amount among the available MPI processes is commonly used
+for achieving the best performance. However, the same principle may not hold
+for compressed data, due to compressed data is stored in "chunks". Note the
+following HDF5 implementation and requirements for reading compressed datasets.
+* HDF5 datasets are divided into chunks, which are compressed individually. The
+  chunk dimension sizes are user-tunable.
+* To fulfill a read request, all compressed chunks containing all or partial
+  data of the request must be first read from the file and decompressed, so the
+  requested data can be retrieved/copied into user buffers.
+* For partial chunk access, the entire chunk must be read before it can be
+  decompressed. Decompression cannot perform on partial chunk.
+* In parallel read operations, it is possible for any two processes reading
+  from disjoined portions of a compressed dataset to actually read the same
+  chunks.
+* As the number of same chunks to be read by multiple processes increases, the
+  parallel read performance decreases.
+  + When MPI independent I/O is used, the data amount to be transferred from
+    the file servers to compute nodes increases as the number of shared chunks
+    increases.
+  + When MPI collective I/O is used, a subset of MPI processes are selected as
+    I/O aggregators, which are the only processes performing reads from the
+    file system. The data read from files are later redistributed to all other
+    processes. In this case, the data amount transferred from file servers can
+    be the same as the requested, if MPI-IO data sieving hint is not enabled.
+    Hoever, the data amount for redistribution increases as the number of
+    shared chunks increases.
+
+One way to prevent shared-chunk access is to align the data partitioning with
+the chunk boundaries. The similar approach has been used in ROMIO's driver to
+implement MPI collective write operations for Lustre file system, which aligns
+the file domain partitioning with the file stripe boundaries and thus minimizes
+the file lock contention. The idea of aligning data partitioning with chunk
+boundaries is to assign the whole chunks to only one process, so no chunk is
+read by two or more processes. This strategy effectively reduces the data
+amount to be transferred from file servers and compute nodes, as well as the
+data amount for redistribution in collective reads. However, there are some
+exceptions.
+* When the number of chunks is small, the degree of read workload balance is
+  low. Especially, when the number of chunks is smaller than the number of MPI
+  processes, some processes may not have chunks to read.
+* When computational workload partitioning pattern does not match with I/O
+  partitioning, an additional data redistribution among processes is necessary.
+
+**Implementation of chunk-aligned data partitioning** -- Command-line option
+"-m 3" enables this feature. It ignores the global key dataset, e.g.
+'/spill/evt.seq' and calculates the data partitioning per group basis using
+the local key dataset.
+* Requirements:
+  + All datasets in the same group of the input file must have the same chunk
+    dimensional sizes. This requires the 'ph5_concat' program to change its
+    implementation on picking chunk dimension sizes.
+    See [8e85e29](https://github.com/NU-CUCIS/ph5concat/commit/8e85e2910680a0d3a60eb8cfaadbe43d019557fa)
+* Implementation:
+  + For each group, the local key dataset of the group, e.g.
+    "/rec.energy.numu/evt.seq", is first read by one of the process and used to
+    calculate the chunk-aligned partition boundaries for all processes.
+  + Because of the above chunk dimensional size requirement, all datasets in
+    the same group share the same chunk dimensional setting.
+  + However, PandAna requires the data with the same key values to be assigned
+    to the same MPI processes. As such data may appear on two consecutive
+    chunks, the chunk-aligned partitioning must move such data to either of the
+    two processes sharing the boundary.
+  + In our implementation, such data is moved from process 'rank' to 'rank+1'.
+    Thus, after the reading phase, there is an MPI send and receive
+    communication between any two consecutive processes.
+  + At the end, the final data partitioning assigned to process 'rank' includes
+    the data received from 'rank-1' and subtracted the data sent to 'rank+1'.
+  + If the computational phase of PandAna can be adaptive to use the
+    chunk-aligned data partitioning, then no additional data redistribution is
+    required. Otherwise, another phase of communication is necessary.
+
 ### Data Parallelism vs. Task Parallelism
 The parallelization strategies are developed based on the ideas of data
 parallelism, task parallelism, and maybe a combinations of the two.
