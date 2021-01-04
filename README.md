@@ -3,24 +3,28 @@
 ---
 ## PandAna Parallel Read Kernel Benchmark
 
-**pandana_benchmark.c** is a MPI-based  C program developed to study the performance
-of parallel read from NOvA file produced by **ph5_concat**. It uses the same
-data partitioning pattern as [PandAna](https://bitbucket.org/mpaterno/pandana),
-a Python package that can be used to select NOvA events of interest.
+**pandana_benchmark.c** is an MPI-based  C program developed to study
+performance of the I/O kernel of [PandAna](https://bitbucket.org/mpaterno/pandana),
+a Python package that is used to analyze the NOvA data by finding events of
+interest. PandAna reads an HDF5 produced by [ph5_concat](https://github.com/NU-CUCIS/ph5concat),
+which concatenates NOvA data stored in multiple HDF5 files into a single file.
+The same data partitioning requirement in PandAna python program is implemented
+in C in pandana_benchmark.c.
 
 ### Data Partitioning Pattern
-PandAna's read data partitioning pattern divides the event IDs exclusively into
-contiguous ranges of event IDs evenly among all processes. The implementation
-includes the followings.
+PandAna's read data partitioning pattern divides the global event IDs into
+contiguous ranges evenly among all processes. This strategy is to ensure an
+approximately balanced data workload among all processes. The read operations
+include the followings.
 1. Find the total number of unique event IDs. This is essentially the length of
-   dataset **'/spill/evt.seq'** whose contents are 0, 1, 2, 3, ...., N-1, if
-   its length is N.
-2. Calculate the partitioning boundaries, so each process is responsible for a
-   exclusive and contiguous range of event IDs. If N is not divisible by P, the
-   number of processes, then the remainder IDs are assigned to the processes of
-   lower ranks.
-3. Note this calculation does not require reading the contents of
-   **'/spill/evt.seq'**, but only inquires the length of **'/spill/evt.seq'**.
+   dataset **'/spill/evt.seq'** whose contents are integers of values 0, 1, 2,
+   3, ...., N-1, if its length is N.
+2. Calculate the global partitioning boundaries, such that each process is
+   responsible for a disjoined and contiguous range of event IDs. If N is not
+   divisible by P, the number of processes, then the remainder IDs are assigned
+   to the processes with lower MPI ranks.
+3. Note this calculation, shown below, does not require reading the contents of
+   dataset **'/spill/evt.seq'**, but only the length of **'/spill/evt.seq'**.
    ```
    my_count = N / nprocs;
    my_start = my_count * rank;
@@ -33,142 +37,163 @@ includes the followings.
    }
    my_end = my_start + my_count - 1;
    ```
-4. Each process is responsible for the range from 'my_start' to 'my_end' inclusively.
+4. Each process is responsible for the global event IDs of range from
+   'my_start' to 'my_end' inclusively.
 
 ### Parallel reads
-Each group, **G**, in the concatenated file contains dataset 'evt.seq' whose values 
-correspond to '/spill/evt.seq' and can be used to find the data element ranges of
-all other datasets in the same group, to be read by all processes.
-   * Note all datasets in the same group share the number of rows, i.e. the
-     size of first dimension.
-   * The contents of **'/G/evt.seq'** are monotonically non-decreasing. It is
-     possible to have repeated event IDs in consecutive elements.
+Once the global event ID ranges for all processes have been calculated, they
+are used to determine what data to be read for datasets in each group.  Each
+group, **G**, in the concatenated file contains dataset 'evt.seq' whose values
+correspond to '/spill/evt.seq' and are used to find the read ranges for all
+other datasets in the group. Note the followings.
+* All datasets in the same group share the number of rows, i.e. the size of
+     first dimension.
+* The contents of **'/G/evt.seq'** are monotonically non-decreasing. It is
+  possible to have repeated event IDs in consecutive elements.
+* Each dataset is read by all processes in parallel.  Data partitioning is
+* based on the global event IDs of ranges, i.e. each process reads only the
+  rows with event IDs falling into its own global event IDs range.
+* To find the range in a dataset that is assigned to a reading process, a
+  binary search is required to find the indices of array elements whose values
+  are **'my_start'** and **'my_end'**.
+  + lower bound: the first array index 'i' such that 'dataset[i] == my_start'
+  + upper bound: the last array index 'j' such that 'dataset[j] == my_end'
 
-Parallel reads consist of the following steps.
-1. Read **'evt.seq'** datasets in all groups and calculate array index ranges
-   (boundaries) responsible by individual process. This can be done in 5
-   options.
-   * Option 0. Root process reads the entire '/G/evt.seq' and then broadcasts 
-     to the remaining processes. All processes use the contents of
-     '/G/evt.seq' to calculate their responsible index ranges. 
+Parallel read is done one group at a time, which consists of the following
+steps.
+1. Read dataset **'evt.seq'** of group 'G' and calculate lower and upper bounds
+   for individual processes. There are 5 implementations.
+   * Option 0. Root process reads the entire '/G/evt.seq' and broadcasts it to
+     the remaining processes. Then, all processes use the contents of
+     '/G/evt.seq' to find its lower and upper bounds.
    * Option 1. All processes collectively read the whole '/G/evt.seq'. All
-     processes calculate their own responsible index ranges.
-   * Option 2. Only root process reads '/G/evt.seq'. Root calculates
-     responsible index ranges for all processes, and calls MPI_Scatter to 
-     scatter the boundaries of ranges (start and end) to all other processes.
-   * Option 3. Distribute reads of evt.seq datasets among processes. Each
-     process got one or more evt.seq dataset assigned makes a single MPI
-     collective read call to read all asigned evt.seq datasets, calculates
-     boundaries for all other processes, and MPI scatters the boundaries.
-   * Option 4. Root process makes POSIX read calls to read all chunks of
-     evt.seq, one dataset at a time, decompress, calculate the boundaries
-     of all processes, and MPI scatter boundaries.
-2. Calculate the responsible index ranges by checking the contents of 
-   **'/G/evt.seq'** of a given group **'G'** to find the starting and ending
-   indices that point to range of event IDs fall into its responsible range.
+     processes independently calculate their own lower and upper bounds.
+   * Option 2. Root reads '/G/evt.seq', calculates lower and upper bounds for
+     all processes, and calls MPI_Scatter to scatter the bounds to all other
+     processes.
+   * Option 3. Distribute reads of all 'evt.seq' datasets among processes. All
+     processes assigned with one or more 'evt.seq' datasets make a single MPI
+     collective read call to read 'evt.seq' datasets, calculates lower and
+     upper bounds for all other processes, and MPI scatters them.
+   * Option 4. Similar to option 3, reading key datasets ('evt.seq') is
+     distributed among processes, but POSIX read calls are used to read and
+     chunks of key datasets, one chunk at a time. Then, readers decpmpress the
+     chunks and calculate the lower and upper bounds of all processes, and MPI
+     scatter them.
+2. Binary search for the lower and upper bound array indices in
+   **'/G/evt.seq'** for each process.
    * Two binary searches should be used, one to search for starting index and
-     the other for ending index. This avoid sequentially checking the array
-     contents.
-3. All processes read the requested datasets in group G collectively, using
-   the starting and ending indices (hyperslab), one dataset at a time.
-   * Note reading index ranges are not overlapping among all processes.
+     the other for ending index. Sequentially checking the array contents
+     should be avoided.
+   * Note the reading lower and upper bound index ranges are not overlapped
+     among processes.
+3. All processes read each datasets in group G collectively, using the lower
+   and upper bounds (through an HDF5 hyperslab). This can be done one dataset
+   at a time (using H5Dread) or all datasets at a time (using MPI-IO).
 
 ### Data partitioning strategies
 In general, data partitioning determines the parallel I/O performance. Evenly
-distributing the I/O amount among the available MPI processes is commonly used
-for achieving the best performance. However, the same principle may not hold
-for compressed data, due to compressed data is stored in "chunks". Note the
-following HDF5 implementation and requirements for reading compressed datasets.
-* HDF5 datasets are divided into chunks, which are compressed individually. The
-  chunk dimension sizes are user-tunable.
+distributing the I/O amount among the available MPI processes is commonly
+considered a strategy for achieving the best performance. However, the same
+principle may not hold for compressed data, due to data chunking is used. Note
+the following HDF5 implementation and requirements for storing and reading
+compressed datasets.
+* In HDF5, a compression enabled dataset is divided into chunks, which are
+  compressed individually. The chunk dimension sizes are user-tunable.
 * To fulfill a read request, all compressed chunks containing all or partial
   data of the request must be first read from the file and decompressed, so the
-  requested data can be retrieved/copied into user buffers.
+  requested data can be retrieved into user buffers.
 * For partial chunk access, the entire chunk must be read before it can be
   decompressed. Decompression cannot perform on partial chunk.
 * In parallel read operations, it is possible for any two processes reading
-  from disjoined portions of a compressed dataset to actually read the same
-  chunks.
+  from disjoined portions in byte range of a compressed dataset to actually
+  read the same chunks.
 * As the number of same chunks to be read by multiple processes increases, the
-  parallel read performance decreases.
-  + When MPI independent I/O is used, the data amount to be transferred from
+  parallel read performance can decrease.
+  + When MPI independent I/O is used, the amount of data to be transferred from
     the file servers to compute nodes increases as the number of shared chunks
     increases.
   + When MPI collective I/O is used, a subset of MPI processes are selected as
     I/O aggregators, which are the only processes performing reads from the
-    file system. The data read from files are later redistributed to all other
-    processes. In this case, the data amount transferred from file servers can
-    be the same as the requested, if MPI-IO data sieving hint is not enabled.
-    Hoever, the data amount for redistribution increases as the number of
-    shared chunks increases.
+    file system. The data read from files are later redistributed from
+    aggregators to non-aggregators. In this case, the amount of data
+    transferred from file servers is the same as the requested, if MPI-IO data
+    sieving hint is not enabled. Hoever, the data amount in the redistribution
+    phase increases as the number of shared chunks increases.
 
-One way to prevent shared-chunk access is to align the data partitioning with
+One way to avoid shared-chunk access is to align the data partitioning with
 the chunk boundaries. The similar approach has been used in ROMIO's driver to
-implement MPI collective write operations for Lustre file system, which aligns
-the file domain partitioning with the file stripe boundaries and thus minimizes
-the file lock contention. The idea of aligning data partitioning with chunk
-boundaries is to assign the whole chunks to only one process, so no chunk is
-read by two or more processes. This strategy effectively reduces the data
-amount to be transferred from file servers and compute nodes, as well as the
-data amount for redistribution in collective reads. However, there are some
-exceptions.
+implement MPI collective write operations for Lustre and GPFS file systems,
+which aligns the file domain partitioning with the file stripe boundaries and
+thus minimizes the file lock contention. The idea of such alignment strategy is
+to assign individual chunks entirely to only one process, so no chunk is read
+by more than one process. This strategy effectively ensures the data amount to
+be transferred from file servers to compute nodes and data redistribution the
+same as the read request, However, there are some exceptions.
 * When the number of chunks is small, the degree of read workload balance is
   low. Especially, when the number of chunks is smaller than the number of MPI
   processes, some processes may not have chunks to read.
-* When computational workload partitioning pattern does not match with I/O
-  partitioning, an additional data redistribution among processes is necessary.
+* When computational workload partitioning pattern does not match with the
+  chunk-aligned data partitioning, an additional data redistribution among
+  processes is necessary.
 
 **Implementation of chunk-aligned data partitioning** -- Command-line option
-"-m 3" enables this feature. It ignores the global key dataset, e.g.
-'/spill/evt.seq' and calculates the data partitioning per group basis using
-the local key dataset.
-* Requirements:
+"-m 3" enables this feature. See command usage below. This option ignores the
+global key dataset, e.g. '/spill/evt.seq', and calculates the data partitioning
+per group basis using the local key dataset, i.e. '/G/evt.seq'.
+* Requirement for input file:
   + All datasets in the same group of the input file must have the same chunk
     dimensional sizes. This requires the 'ph5_concat' program to change its
-    implementation on picking chunk dimension sizes.
-    See [8e85e29](https://github.com/NU-CUCIS/ph5concat/commit/8e85e2910680a0d3a60eb8cfaadbe43d019557fa)
+    implementation for picking the chunk dimension sizes. Commit
+    [8e85e29](https://github.com/NU-CUCIS/ph5concat/commit/8e85e2910680a0d3a60eb8cfaadbe43d019557fa)
+    changes from the 1-MiB based chunk size to 256 K elementa based.
 * Implementation:
-  + For each group, the local key dataset of the group, e.g.
-    "/rec.energy.numu/evt.seq", is first read by one of the process and used to
-    calculate the chunk-aligned partition boundaries for all processes.
-  + Because of the above chunk dimensional size requirement, all datasets in
-    the same group share the same chunk dimensional setting.
+  + For each group 'G', the local key dataset of the group, e.g. '/G/evt.seq",
+    is first read by root process which uses it to calculate the chunk-aligned
+    lower and upper bounds for all processes.
+  + Because of the above requirement on chunk dimension size for all datasets
+    in the same group, the aligned lower and upper bounds can be calculated
+    only once and then used to read all datasets.
   + However, PandAna requires the data with the same key values to be assigned
-    to the same MPI processes. As such data may appear on two consecutive
-    chunks, the chunk-aligned partitioning must move such data to either of the
-    two processes sharing the boundary.
+    to the same MPI processes. As there can be multiple 'rows' with the same
+    global key ID, such rows may appear on two consecutive chunks. In this
+    case, those rows must be moved to either of the two processes.
   + In our implementation, such data is moved from process 'rank' to 'rank+1'.
     Thus, after the reading phase, there is an MPI send and receive
     communication between any two consecutive processes.
-  + At the end, the final data partitioning assigned to process 'rank' includes
-    the data received from 'rank-1' and subtracted the data sent to 'rank+1'.
-  + If the computational phase of PandAna can be adaptive to use the
+  + The final data partitioning array index range assigned to process 'rank'
+    includes the data received from 'rank-1' and subtracted the data sent to
+    'rank+1'.
+  + If the computational phase of PandAna can be adaptive to use the above
     chunk-aligned data partitioning, then no additional data redistribution is
     required. Otherwise, another phase of communication is necessary.
 
 ### Data Parallelism vs. Task Parallelism
-The parallelization strategies are developed based on the ideas of data
-parallelism, task parallelism, and maybe a combinations of the two.
-* **Data Parallelism** - All processes read all individual datasets in
-  parallel. In this case, all processes opens each dataset in each group, reads
-  the contents of the dataset using the responsible event ID ranges, and closes
-  the dataset.
-* **Group Parallelism** -
+The parallelization strategies can be data parallelism, task parallelism, and
+a combinations of the two.
+* **Data Parallelism** - All processes read individual datasets in parallel.
+  + Each process opens a dataset, reads a subarray of the dataset using the
+    assigned responsible event ID ranges, and closes the dataset.
+  + The degree of read workload balance depends on the dataset size and the
+    number of MPI processes. A good performance is expected when datasets are
+    large enough to be partitioned among processes.
+* **Group Parallelism** - A group is considered as a task.
   + When the number of processes is smaller than the number of groups, the
     groups are divided among available processes. Each process is reading the
     datasets of only assigned groups.
   + When the number of processes is larger than the number of groups, the
-    processes are divided into subsets. Processes in a subset are assigned a
-    group and are responsible to read the datasets in that group. In this
-    approach, groups are considered as **tasks**. Reading multiple groups can
-    occur simultaneously.
+    processes are divided into subsets, with split MPI communicators. Processes
+    in a subset are assigned a group and are responsible to read the datasets
+    in that group. In this approach, groups are considered as **tasks**. Within
+    a group, the data parallelism is ued. Reading multiple groups can occur
+    simultaneously.
 * **Dataset Parallelism** - All datasets, except key datasets, in all groups
   are evenly assigned to the MPI processes. One dataset is read entirely by a
-  process only. Each process is responsible to read the assigned dataset.
+  process only. Each process is responsible to read the assigned datasets.
   + Only HDF5 H5Dread() is called.
-  + Reading the key datasets is skipped, as there is no need of those datasets.
-  + The degree of parallelism is limited to the number of datasets . When
-    running more processes than the datasets, some processes may have no
+  + Reading the key datasets is skipped, as there is no use of those datasets.
+  + The degree of parallelism is limited to the number of datasets . When the
+    number of MPI processes is more than the datasets, some processes have no
     dataset to read.
 
 ### Run Command usage:
