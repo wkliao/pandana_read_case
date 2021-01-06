@@ -37,12 +37,13 @@
 
 static int
 inq_dset_meta(hid_t, size_t*, hsize_t*, hsize_t*);
+
+#ifdef PANDANA_BENCHMARK
 static size_t
 binary_search_min(long long, int64_t*, size_t);
 static size_t
 binary_search_max(long long, int64_t*, size_t);
 
-#ifdef PANDANA_BENCHMARK
 static int seq_opt;
 static int dset_opt;
 static int posix_fd;
@@ -1644,6 +1645,7 @@ pandana_mpi_read_subarrays_aggr(hid_t         fd,        /* HDF5 file descriptor
     return read_len;
 }
 
+#ifdef PANDANA_BENCHMARK
 /* return the smallest index i, such that base[i] >= key */
 static size_t
 binary_search_min(long long  key,
@@ -1677,6 +1679,7 @@ binary_search_max(long long  key,
     }
     return (low-1);
 }
+#endif
 
 /*----< inq_dset_meta() >----------------------------------------------------*/
 static int
@@ -1825,10 +1828,22 @@ if (seq_opt == 3) {
 
     /* calculate lower and upper bounds for all processes */
     for (g=0; g<my_nGroups; g++) {
-        for (k=0, p=0; p<nprocs; p++) {
-            bounds[g][k++] = binary_search_min(starts[p], seqBuf[g], dim0[g]);
-            bounds[g][k++] = binary_search_max(ends[p],   seqBuf[g], dim0[g]);
+        /* Assume starts[p] always >= starts[p-1] */
+        for(k = 0; k < dim0[g]; k++){
+            while(((int64_t*)seqBuf[g])[k] >= starts[p]){
+                bounds[g][p << 1] = k;  /* Start of process p */
+                p++;    /* Now looking for start of the next process */
+            }
         }
+        for(;p < nprocs; p++){ /* k may run out first */
+            bounds[g][p << 1] = k;
+        }
+        for(p = 1; p < nprocs; p++){ /* (end of of p - 1) = (start of p) - 1 */
+            bounds[g][(p << 1) - 1] = bounds[g][p << 1] - 1;  
+        }
+        /* Assume end of rank (np - 1) is always the last element */
+        bounds[g][(p << 1) - 1] = dim0[g];
+
         free(seqBuf[g]);
         herr_t err = H5Dclose(dsets[g]);
         if (err < 0) CHECK_ERROR(err, "H5Dclose");
@@ -1858,10 +1873,22 @@ else if (seq_opt == 4) {
         read_len += pandana_posix_read_dset(dset, posix_fd, seqBuf);
 
         /* calculate lower and upper bounds for all processes */
-        for (k=0, p=0; p<nprocs; p++) {
-            bounds[g][k++] = binary_search_min(starts[p], seqBuf, dims[0]);
-            bounds[g][k++] = binary_search_max(ends[p],   seqBuf, dims[0]);
+        /* Assume starts[p] always >= starts[p-1] */
+        for(k = 0; k < dims[0]; k++){
+            while(((int64_t*)seqBuf)[k] >= starts[p]){
+                bounds[g][p << 1] = k;  /* Start of process p */
+                p++;    /* Now looking for start of the next process */
+            }
         }
+        for(;p < nprocs; p++){ /* k may run out first */
+            bounds[g][p << 1] = k;
+        }
+        for(p = 1; p < nprocs; p++){ /* (end of of p - 1) = (start of p) - 1 */
+            bounds[g][(p << 1) - 1] = bounds[g][p << 1] - 1;  
+        }
+        /* Assume end of rank (np - 1) is always the last element */
+        bounds[g][(p << 1) - 1] = dims[0];
+
         free(seqBuf);
         err = H5Dclose(dset);
         if (err < 0) CHECK_ERROR(err, "H5Dclose");
