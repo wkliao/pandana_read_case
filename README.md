@@ -58,6 +58,9 @@ other datasets in the group. Note the followings.
   are **'my_start'** and **'my_end'**.
   + lower bound: the first array index 'i' such that 'dataset[i] == my_start'
   + upper bound: the last array index 'j' such that 'dataset[j] == my_end'
+  + Once i and j have been found, the process uses them to read a subarray
+    starting from index 'i' till 'j' ('i' and 'j' can be used to construct an
+    HDF5 hyperslab).
 
 Parallel read is done one group at a time, which consists of the following
 steps.
@@ -220,7 +223,7 @@ a combinations of the two.
                    2: use MPI_file_read_all, all datasets in one group at a
                       time
                    3: use chunk-aligned partitioning and H5Dread to read one
-                      dataset at a time. When used, -s argument is ignored.
+                      dataset at a time. When set, option -s is ignored.
                       Reading key datasets are distributed using H5Dread, one
                       dataset at a time.
     [-r number]    parallelization method (0 or 1)
@@ -228,7 +231,8 @@ a combinations of the two.
                       parallel (default)
                    1: group parallelism - processes are divided among groups
                       then data parallelism within each groups
-                   2: dataset parallelism - divide all datasets among processes
+                   2: dataset parallelism - divide all datasets of all groups
+                      among processes. When set, options -s and -m are ignored.
     [-l file_name] name of file containing dataset names to be read
     [-i file_name] name of input HDF5 file
     *ph5concat version 1.1.0 of March 1, 2020.

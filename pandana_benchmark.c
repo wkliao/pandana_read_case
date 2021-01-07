@@ -469,7 +469,7 @@ usage(char *progname)
                  2: use MPI_file_read_all, all datasets in one group at a\n\
                     time\n\
                  3: use chunk-aligned partitioning and H5Dread to read one\n\
-                    dataset at a time. When used, -s argument is ignored.\n\
+                    dataset at a time. When set, option -s is ignored.\n\
                     Reading key datasets are distributed using H5Dread, one\n\
                     dataset at a time.\n\
   [-r number]    parallelization method (0 or 1)\n\
@@ -477,7 +477,8 @@ usage(char *progname)
                     parallel (default)\n\
                  1: group parallelism - processes are divided among groups\n\
                     then data parallelism within each groups\n\
-                 2: dataset parallelism - divide all datasets among processes\n\
+                 2: dataset parallelism - divide all datasets of all groups\n\
+                    among processes. When set, options -s and -m are ignored.\n\
   [-l file_name] name of file containing dataset names to be read\n\
   [-i file_name] name of input HDF5 file\n\
   *ph5concat version _PH5CONCAT_VERSION_ of _PH5CONCAT_RELEASE_DATE_\n"
