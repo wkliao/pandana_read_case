@@ -1,5 +1,5 @@
 MPICC    = mpicc
-HDF5_DIR = $(HOME)/HDF5/1.12.0
+HDF5_DIR = $(HOME)/.local/hdf5/1.12.0
 
 OPTS     = -g -O0 -Wall
 CPPFLAGS = -I. -I$(HDF5_DIR)/include

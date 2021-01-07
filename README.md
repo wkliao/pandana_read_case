@@ -80,11 +80,16 @@ steps.
      chunks of key datasets, one chunk at a time. Then, readers decpmpress the
      chunks and calculate the lower and upper bounds of all processes, and MPI
      scatter them.
-2. Binary search for the lower and upper bound array indices in
+2. Search for the lower and upper bound array indices in
    **'/G/evt.seq'** for each process.
-   * Two binary searches should be used, one to search for starting index and
-     the other for ending index. Sequentially checking the array contents
-     should be avoided.
+   * For option 0 to 2 in step 1, two binary searches should be used, one to 
+     search for starting index and the other for ending index. Sequentially 
+     checking the array contents should be avoided.
+   * For options 3 and 4, a linear search can be used to calculate the starting
+     index and ending index for all processes in one pass.
+     It is based on the assumption that the starting index of the process i is 
+     larger or equal to the starting index of the process i - 1, and the ending 
+     index of the process i - 1 is the starting index of the process i.
    * Note the reading lower and upper bound index ranges are not overlapped
      among processes.
 3. All processes read each datasets in group G collectively, using the lower
