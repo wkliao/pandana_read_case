@@ -246,6 +246,60 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
 
 #endif
 
+/*----< dataset_partitioning() >---------------------------------------------*/
+static int
+dataset_partitioning(int  nDatasets,
+                     int  nprocs,
+                     int  rank,
+                     int *my_start,
+                     int *my_count,
+                     int *roots)       /* [nDatasets] */
+{
+    int j, k, span, rem;
+
+    /* partition read workload among processes. When nprocs is larger than
+     * nDatasets, some processes have no data to read, but still participate
+     * calls to MPI_Scatter. Array roots[] contains the ranks of processes
+     * assigned with read workload.
+     */
+    if (nprocs > nDatasets) { /* spread out the readers */
+        span = nprocs / nDatasets;
+        if (rank % span == 0 && rank < nDatasets * span) {
+            *my_count = 1;
+            *my_start = rank / span;
+        }
+        else
+            *my_count = *my_start = 0;
+
+        if (roots != NULL)
+            for (j=0; j<nDatasets; j++)
+                roots[j] = j * span;
+    }
+    else {
+        *my_count = nDatasets / nprocs;
+        *my_start = *my_count * rank;
+        if (rank < nDatasets % nprocs) {
+            *my_start += rank;
+            (*my_count)++;
+        }
+        else
+            *my_start += nDatasets % nprocs;
+
+        if (roots != NULL) {
+            span = nDatasets / nprocs;
+            rem = nDatasets % nprocs;
+            if (rem) span++;
+            for (j=0; j<rem*span; j++)
+                roots[j] = j / span;
+            if (rem) span--;
+            k = j;
+            for (; j<nDatasets; j++)
+                roots[j] = rem + (j - k) / span;
+        }
+    }
+    return 1;
+}
+
 /*----< pandana_inq_ranges() >-----------------------------------------------*/
 /* Given the number of unique IDs from 0 to (numIDs-1), partition the IDs among
  * nprocs processes evenly and disjointly such that process rank is assigned
@@ -714,18 +768,9 @@ pandana_hdf5_read_keys_align(MPI_Comm   comm,
     MPI_Comm_size(comm, &nprocs);
     MPI_Comm_rank(comm, &rank);
 
-    /* partition read workload among processes. When nprocs is larger than
-     * nKeys, some processes have no data to read, but still participate
-     * calls to MPI_Scatter
-     */
-    my_nKeys = nKeys / nprocs;
-    my_startKey = my_nKeys * rank;
-    if (rank < nKeys % nprocs) {
-        my_startKey += rank;
-        my_nKeys++;
-    }
-    else
-        my_startKey += nKeys % nprocs;
+    int *roots = (int*) malloc(nKeys * sizeof(int));
+
+    dataset_partitioning(nKeys, nprocs, rank, &my_startKey, &my_nKeys, roots);
 
     /* only processes got assigned read the key dataset(s) and calculate the
      * send/recv number of elements to/from the neighbors.
@@ -887,20 +932,11 @@ pandana_hdf5_read_keys_align(MPI_Comm   comm,
      * calculate rank of root process for each MPI_Scatter. Each time
      * MPI_Scatter is called, all processes must agree on the root rank.
      */
-    int root = 0;
-    int rem = nKeys % nprocs;
-    count = nKeys / nprocs;
-    if (rem) count++;
-    rem *= count;
-    for (g=0,j=0; g<nKeys; g++,j++) {
-        if (g > 0) { /* check if need to increment root */
-            if (g == rem) { j -= rem; count--; }
-            if (j % count == 0) root++;
-        }
+    for (g=0; g<nKeys; g++) {
         /* only root process allocates buffers for recv_send */
-        int *scatter_buf = (root == rank) ? recv_send[g-my_startKey] : NULL;
+        int *scatter_buf = (roots[g] == rank) ? recv_send[g-my_startKey] : NULL;
         int nElems[2];
-        MPI_Scatter(scatter_buf, 2, MPI_INT, nElems, 2, MPI_INT, root, comm);
+        MPI_Scatter(scatter_buf, 2, MPI_INT, nElems, 2, MPI_INT, roots[g], comm);
         nRecvs[g] = nElems[0]; /* number of elements to be received from rank-1 */
         nSends[g] = nElems[1]; /* number of elements to be sent     to   rank+1 */
     }
@@ -908,6 +944,7 @@ pandana_hdf5_read_keys_align(MPI_Comm   comm,
         free(recv_send[0]);
         free(recv_send);
     }
+    free(roots);
 
     return read_len;
 }
@@ -949,18 +986,9 @@ pandana_mpi_read_keys_align(MPI_Comm   comm,
     MPI_Comm_size(comm, &nprocs);
     MPI_Comm_rank(comm, &rank);
 
-    /* partition read workload among processes. When nprocs is larger than
-     * nKeys, some processes have no data to read, but still participate
-     * calls to MPI_Scatter
-     */
-    my_nKeys = nKeys / nprocs;
-    my_startKey = my_nKeys * rank;
-    if (rank < nKeys % nprocs) {
-        my_startKey += rank;
-        my_nKeys++;
-    }
-    else
-        my_startKey += nKeys % nprocs;
+    int *roots = (int*) malloc(nKeys * sizeof(int));
+
+    dataset_partitioning(nKeys, nprocs, rank, &my_startKey, &my_nKeys, roots);
 
     /* only processes got assigned read the key dataset(s) and calculate the
      * send/recv number of elements to/from the neighbors.
@@ -1142,20 +1170,11 @@ pandana_mpi_read_keys_align(MPI_Comm   comm,
      * calculate rank of root process for each MPI_Scatter. Each time
      * MPI_Scatter is called, all processes must agree on the root rank.
      */
-    int root = 0;
-    int rem = nKeys % nprocs;
-    count = nKeys / nprocs;
-    if (rem) count++;
-    rem *= count;
-    for (g=0,j=0; g<nKeys; g++,j++) {
-        if (g > 0) { /* check if need to increment root */
-            if (g == rem) { j -= rem; count--; }
-            if (j % count == 0) root++;
-        }
+    for (g=0; g<nKeys; g++) {
         /* only root process allocates buffers for recv_send */
-        int *scatter_buf = (root == rank) ? recv_send[g-my_startKey] : NULL;
+        int *scatter_buf = (roots[g] == rank) ? recv_send[g-my_startKey] : NULL;
         int nElems[2];
-        MPI_Scatter(scatter_buf, 2, MPI_INT, nElems, 2, MPI_INT, root, comm);
+        MPI_Scatter(scatter_buf, 2, MPI_INT, nElems, 2, MPI_INT, roots[g], comm);
         nRecvs[g] = nElems[0]; /* no. elements to be received from rank-1 */
         nSends[g] = nElems[1]; /* no. elements to be sent     to   rank+1 */
     }
@@ -1163,6 +1182,7 @@ pandana_mpi_read_keys_align(MPI_Comm   comm,
         free(recv_send[0]);
         free(recv_send);
     }
+    free(roots);
 
     return read_len;
 }
@@ -2077,7 +2097,7 @@ pandana_read_keys(MPI_Comm   comm,       /* MPI communicator */
                   size_t    *lowers,     /* OUT: [nGroups] */
                   size_t    *uppers)     /* OUT: [nGroups] inclusive bound */
 {
-    int j, g, k, p, nprocs, rank, my_startGrp, my_nGroups;
+    int g, k, p, nprocs, rank, my_startGrp, my_nGroups;
     ssize_t read_len;
     long long **bounds, lower_upper[2];
 
@@ -2115,14 +2135,8 @@ pandana_read_keys(MPI_Comm   comm,       /* MPI communicator */
      * nGroups, some processes have no data to read, but still participate
      * calls to MPI_Scatter
      */
-    my_nGroups = nGroups / nprocs;
-    my_startGrp = my_nGroups * rank;
-    if (rank < nGroups % nprocs) {
-        my_startGrp += rank;
-        my_nGroups++;
-    }
-    else
-        my_startGrp += nGroups % nprocs;
+    int *roots = (int*) malloc(nGroups * sizeof(int));
+    dataset_partitioning(nGroups, nprocs, rank, &my_startGrp, &my_nGroups, roots);
 
     /* only processes got assigned read the key dataset(s) and calculate the
      * lower and upper bounds
@@ -2218,28 +2232,21 @@ else if (seq_opt == 4) {
      * roots. We now calculate rank of root process for each MPI_Scatter. Each
      * time MPI_Scatter is called, all processes must agree on the root rank.
      */
-    int root = 0;
-    int rem = nGroups % nprocs;
-    int count = nGroups / nprocs;
-    if (rem) count++;
-    rem *= count;
-    for (g=0,j=0; g<nGroups; g++,j++) {
-        if (g > 0) { /* check if need to increment root */
-            if (g == rem) { j -= rem; count--; }
-            if (j % count == 0) root++;
-        }
+    for (g=0; g<nGroups; g++) {
         /* only root process allocates buffers for bounds */
-        void *scatter_buf = (root == rank) ? bounds[g-my_startGrp] : NULL;
+        void *scatter_buf = (roots[g] == rank) ? bounds[g-my_startGrp] : NULL;
         MPI_Scatter(scatter_buf, 2, MPI_LONG_LONG, lower_upper, 2,
-                    MPI_LONG_LONG, root, comm);
+                    MPI_LONG_LONG, roots[g], comm);
         lowers[g] = lower_upper[0];
         uppers[g] = lower_upper[1];
     }
+
+    /* free allocated memory space */
     if (my_nGroups > 0) {
         free(bounds[0]);
         free(bounds);
     }
-    /* free allocated memory space */
+    free(roots);
     if (starts != NULL) free(starts);
 
     return read_len;
