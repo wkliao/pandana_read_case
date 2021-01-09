@@ -217,7 +217,7 @@ a combinations of the two.
                       boundaries to other processes
                    4: root POSIX reads all chunks of keys, one dataset at a
                       time, decompress, and scatter boundaries
-    [-m number]    read method for other datasets (0, 1, 2, or 3)
+    [-m number]    read method for other datasets (0, 1, 2, 3, or 4)
                    0: use H5Dread, one dataset at a time (default)
                    1: use MPI_file_read_all, one dataset at a time
                    2: use MPI_file_read_all, all datasets in one group at a
@@ -226,6 +226,10 @@ a combinations of the two.
                       dataset at a time. When set, option -s is ignored.
                       Reading key datasets are distributed using H5Dread, one
                       dataset at a time.
+                   4: use chunk-aligned partitioning and MPI-IO to read all
+                      datasets in a group. When used, -s argument is ignored.
+                      Reading key datasets are distributed among processes and
+                      MPI_File_read_all to read all assigned key dataset.
     [-r number]    parallelization method (0 or 1)
                    0: data parallelism - all processes read each dataset in
                       parallel (default)

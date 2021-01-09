@@ -472,6 +472,10 @@ usage(char *progname)
                     dataset at a time. When set, option -s is ignored.\n\
                     Reading key datasets are distributed using H5Dread, one\n\
                     dataset at a time.\n\
+                 4: use chunk-aligned partitioning and MPI-IO to read all\n\
+                    datasets in a group. When used, -s argument is ignored.\n\
+                    Reading key datasets are distributed among processes and\n\
+                    MPI_File_read_all to read all assigned key dataset.\n\
   [-r number]    parallelization method (0 or 1)\n\
                  0: data parallelism - all processes read each dataset in\n\
                     parallel (default)\n\
@@ -542,9 +546,9 @@ int main(int argc, char **argv)
         }
         goto fn_exit;
     }
-    if (dset_opt < 0 || dset_opt > 3) { /* option for reading other datasets */
+    if (dset_opt < 0 || dset_opt > 4) { /* option for reading other datasets */
         if (rank  == 0) {
-            printf("Error: option -m must be 0, 1, 2, or 3\n");
+            printf("Error: option -m must be 0, 1, 2, 3, or 4\n");
             usage(argv[0]);
         }
         goto fn_exit;
@@ -591,6 +595,8 @@ int main(int argc, char **argv)
             printf("skipped\n");
         if (dset_opt == 3)
             printf("Distributed H5Dread and scatters aligned boundaries\n");
+        else if (dset_opt == 4)
+            printf("Distributed MPI reads and scatters aligned boundaries\n");
         else if (seq_opt == 0)
             printf("root process H5Dread and broadcasts\n");
         else if (seq_opt == 1)
@@ -613,6 +619,8 @@ int main(int argc, char **argv)
             printf("MPI collective read and decompress, all datasets in one group at a time\n");
         else if (dset_opt == 3)
             printf("Align data partitioning with chunk boundaries and call H5Dread to read in parallel\n");
+        else if (dset_opt == 4)
+            printf("Align data partitioning with chunk boundaries and call collective MPI read\n");
 
         printf("Parallelization method: ");
         if (parallelism == 0)
@@ -638,7 +646,7 @@ int main(int argc, char **argv)
     char *dset_global_ID = "/spill/evt.seq";
 
 #ifdef PANDANA_BENCHMARK
-    if (parallelism < 2 && dset_opt != 3)
+    if (parallelism < 2 && dset_opt != 3 && dset_opt != 4)
 #else
     if (parallelism < 2)
 #endif

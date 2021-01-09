@@ -683,7 +683,7 @@ pandana_hdf5_read_subarray(hid_t    fd,         /* HDF5 file descriptor */
 /*----< pandana_hdf5_read_keys_align() >-------------------------------------*/
 /* Distribute reading of key datasets among available processes and call
  * H5Dread to read the assigned key datasets in whole. All processes calculate
- * its array index boundaries into lowers[] and uppers[].  Processes with key
+ * their array index boundaries into lowers[] and uppers[].  Processes with key
  * datasets assigned calculate the numbers of elements for each process rank to
  * be received from its immediately previous process into nRecvs[] and sent to
  * successive process into nSends[]. nRecvs[] is the number of elements read by
@@ -898,7 +898,7 @@ pandana_hdf5_read_keys_align(MPI_Comm   comm,
             if (j % count == 0) root++;
         }
         /* only root process allocates buffers for recv_send */
-        void *scatter_buf = (root == rank) ? recv_send[g-my_startKey] : NULL;
+        int *scatter_buf = (root == rank) ? recv_send[g-my_startKey] : NULL;
         int nElems[2];
         MPI_Scatter(scatter_buf, 2, MPI_INT, nElems, 2, MPI_INT, root, comm);
         nRecvs[g] = nElems[0]; /* number of elements to be received from rank-1 */
@@ -912,7 +912,262 @@ pandana_hdf5_read_keys_align(MPI_Comm   comm,
     return read_len;
 }
 
-/*----< pandana_hdf5_read_subarrays_align() >--------------------------------------*/
+/*----< pandana_mpi_read_keys_align() >--------------------------------------*/
+/* Distribute reading of key datasets among available processes and call a
+ * single MPI_File_read_all to read all the assigned key datasets. All
+ * processes calculate their array index boundaries into lowers[] and uppers[].
+ * Processes with key datasets assigned calculate the numbers of elements for
+ * each process rank to be received from its immediately previous process into
+ * nRecvs[] and sent to successive process into nSends[]. nRecvs[] is the
+ * number of elements read by the immediately previous process that have the
+ * same key value of the first element read by this process. In this case, we
+ * move those elements from previous process to this process.  nSends[] is the
+ * number of elements to be sent to the immediately successive process.  This
+ * strategy lets array elements with the same key values to be partitioned
+ * into the same processes.  nRecvs[] and nSends[] are then MPI scatter-ed to
+ * all other processes.
+ */
+ssize_t
+pandana_mpi_read_keys_align(MPI_Comm   comm,
+                            hid_t      fd,      /* HDF5 file ID */
+                            MPI_File   fh,      /* MPI file handle */
+                            int        nKeys,   /* number of key datasets */
+                            char     **keyNames,/* IN:  [nKeys] dataset names */
+                            size_t    *lowers,  /* OUT: [nKeys] read start array index */
+                            size_t    *uppers,  /* OUT: [nKeys] read end   array index */
+                            int       *nRecvs,  /* OUT: [nKeys] no. elements to recv */
+                            int       *nSends)  /* OUT: [nKeys] no. elements to recv */
+{
+    int g, j, k, ndims, chunk_ndims, *nChunks, my_startChunk, my_nChunks;
+    int nprocs, rank, start, count, end, **recv_send, my_nKeys, my_startKey;
+    herr_t err;
+    hid_t *dsets, fspace, chunk_plist;
+    hsize_t dims[2], chunk_dims[2], *dim0, *chunk_dim0;
+    ssize_t read_len;
+    void **keyBuf;
+
+    MPI_Comm_size(comm, &nprocs);
+    MPI_Comm_rank(comm, &rank);
+
+    /* partition read workload among processes. When nprocs is larger than
+     * nKeys, some processes have no data to read, but still participate
+     * calls to MPI_Scatter
+     */
+    my_nKeys = nKeys / nprocs;
+    my_startKey = my_nKeys * rank;
+    if (rank < nKeys % nprocs) {
+        my_startKey += rank;
+        my_nKeys++;
+    }
+    else
+        my_startKey += nKeys % nprocs;
+
+    /* only processes got assigned read the key dataset(s) and calculate the
+     * send/recv number of elements to/from the neighbors.
+     */
+    if (my_nKeys > 0) {
+        recv_send = (int**) malloc(my_nKeys * sizeof(int*));
+        if (recv_send == NULL) CHECK_ERROR(-1, "malloc");
+        recv_send[0] = (int*) malloc(my_nKeys * nprocs * 2 * sizeof(int));
+        if (recv_send[0] == NULL) CHECK_ERROR(-1, "malloc");
+        for (g=1; g<my_nKeys; g++)
+            recv_send[g] = recv_send[g-1] + nprocs * 2;
+
+        nChunks = (int*) malloc(my_nKeys * sizeof(int));
+        if (nChunks == NULL) CHECK_ERROR(-1, "malloc");
+        dsets = (hid_t*) malloc(my_nKeys * sizeof(hid_t));
+        if (dsets == NULL) CHECK_ERROR(-1, "malloc");
+        dim0 = (hsize_t*) malloc(my_nKeys * 2 * sizeof(hsize_t));
+        if (dim0 == NULL) CHECK_ERROR(-1, "malloc");
+        chunk_dim0 = dim0 + my_nKeys;
+        keyBuf = (void**) malloc(my_nKeys * sizeof(void*));
+        if (keyBuf == NULL) CHECK_ERROR(-1, "malloc");
+    }
+
+    for (g=0; g<nKeys; g++) {
+        /* open dataset */
+        hid_t dset = H5Dopen2(fd, keyNames[g], H5P_DEFAULT);
+        if (dset < 0) CHECK_ERROR(dset, "H5Dopen2");
+
+        /* inquire dimension size and chunk dimension sizes of key dataset */
+        fspace = H5Dget_space(dset);
+        if (fspace < 0) CHECK_ERROR(fspace, "H5Dget_space");
+        ndims = H5Sget_simple_extent_ndims(fspace);
+        if (ndims != 2) CHECK_ERROR(-1, "H5Sget_simple_extent_ndims");
+        err = H5Sget_simple_extent_dims(fspace, dims, NULL);
+        if (err < 0) CHECK_ERROR(err, "H5Sget_simple_extent_dims");
+        if (dims[1] != 1) CHECK_ERROR(err, "dims[1] != 1");
+        err = H5Sclose(fspace);
+        if (err < 0) CHECK_ERROR(err, "H5Sclose");
+
+        /* inquire chunk size along each dimension of key dataset */
+        chunk_plist = H5Dget_create_plist(dset);
+        if (chunk_plist < 0) CHECK_ERROR(err, "H5Dget_create_plist");
+        chunk_ndims = H5Pget_chunk(chunk_plist, 2, chunk_dims);
+        if (chunk_ndims != 2) CHECK_ERROR(-1, "chunk_ndims != 2");
+        if (chunk_dims[1] != 1) CHECK_ERROR(-1, "chunk_dims[1] != 1");
+        err = H5Pclose(chunk_plist);
+        if (err < 0) CHECK_ERROR(err, "H5Pclose");
+
+        int total_nChunks = dims[0] / chunk_dims[0];
+        if (dims[0] % chunk_dims[0]) total_nChunks++;
+
+        /* calculate chunks assigned to this process */
+        my_nChunks = total_nChunks / nprocs;
+        my_startChunk = my_nChunks * rank;
+        if (rank < total_nChunks % nprocs) {
+            my_startChunk += rank;
+            my_nChunks++;
+        }
+        else
+            my_startChunk += total_nChunks % nprocs;
+
+        /* calculate array start index and array element count */
+        if (my_nChunks == 0)
+            lowers[g] = uppers[g] = 0;
+        else {
+            lowers[g] = my_startChunk * chunk_dims[0];
+            uppers[g] = (my_startChunk + my_nChunks) * chunk_dims[0] - 1;
+            uppers[g] = MIN(uppers[g], dims[0] - 1); /* last chunk may not be a full chunk */
+        }
+
+        if (g >= my_startKey && g < my_startKey + my_nKeys) {
+            int local_g = g - my_startKey;
+
+                  dim0[local_g] =       dims[0];
+            chunk_dim0[local_g] = chunk_dims[0];
+               nChunks[local_g] = total_nChunks;
+
+            /* inquire data type and size */
+            hid_t dtype = H5Dget_type(dset);
+            if (dtype < 0) CHECK_ERROR(dtype, "H5Dget_type");
+            size_t dtype_size = H5Tget_size(dtype);
+            if (dtype_size == 0) CHECK_ERROR(-1, "H5Tget_size");
+            err = H5Tclose(dtype);
+            if (err < 0) CHECK_ERROR(err, "H5Tclose");
+
+            dsets[local_g] = dset;
+            keyBuf[local_g] = (void*) malloc(dims[0] * dtype_size);
+            if (keyBuf == NULL) CHECK_ERROR(-1, "malloc");
+        }
+        else {
+            herr_t err = H5Dclose(dset);
+            if (err < 0) CHECK_ERROR(err, "H5Dclose");
+        }
+    }
+
+    /* keys are read concurrently by multiple processes. Each root reads all
+     * the assigned key datasets. Non-root processes just participate the
+     * collective read calls.
+     */
+    read_len = pandana_mpi_read_dsets(comm, fd, fh, my_nKeys, dsets, keyBuf);
+
+    /* calculates send/receive amount between 2 consecutive processes */
+    for (g=0; g<my_nKeys; g++) {
+        int64_t *buf = (int64_t*)keyBuf[g];
+
+        herr_t err = H5Dclose(dsets[g]);
+        if (err < 0) CHECK_ERROR(err, "H5Dclose");
+
+        count = nChunks[g] / nprocs;
+        for (j=0; j<nChunks[g] % nprocs; j++) {
+            start = (count * j + j) * chunk_dim0[g];
+            end = start + (count + 1) * chunk_dim0[g]; /* exclusive */
+            end = MIN(end, dim0[g]); /* last chunk may not be a full chunk */
+
+            if (j == 0)
+                recv_send[g][2*j] = 0; /* recv nothing from rank-1 */
+            else {
+                k = start;
+                while (k > 0 && buf[start] == buf[k-1]) k--;
+                recv_send[g][2*j] = start - k; /* to receive from rank-1 */
+                if (start-k >= (count+1)*chunk_dim0[g])
+                    printf("ERROR: number of same key value %"PRId64" is more than chunk size=%lld\n",
+                           buf[start], chunk_dim0[g]);
+            }
+            if (j < nprocs - 1 && j < nChunks[g] - 1) {
+                k = end;
+                while (k > 0 && buf[end] == buf[k-1]) k--;
+                recv_send[g][2*j+1] = end - k; /* to send to rank+1 */
+                if (end-k >= (count+1)*chunk_dim0[g])
+                    printf("ERROR: number of same key value %"PRId64" is more than chunk size=%lld\n",
+                           buf[end], chunk_dim0[g]);
+            }
+            else /* send nothing to rank+1 */
+                recv_send[g][2*j+1] = 0;
+        }
+        for (; j<nprocs; j++) {
+            if (j >= nChunks[g]) { /* in case nChunks < nprocs */
+                recv_send[g][2*j] = 0;
+                recv_send[g][2*j+1] = 0;
+                continue;
+            }
+            start = (count * j + nChunks[g] % nprocs) * chunk_dim0[g];
+            end = start + count * chunk_dim0[g]; /* exclusive */
+            end = MIN(end, dim0[g]); /* last chunk may not be a full chunk */
+
+            if (j == 0)
+                recv_send[g][2*j] = 0; /* recv nothing from rank-1 */
+            else {
+                k = start;
+                while (k > 0 && buf[start] == buf[k-1]) k--;
+                recv_send[g][2*j] = start - k; /* to recv from rank-1 */
+                if (start-k >= count*chunk_dim0[g])
+                    printf("ERROR: number of same key value %"PRId64" is more than chunk size=%lld\n",
+                           buf[start], chunk_dim0[g]);
+            }
+            if (j == nprocs - 1)
+                recv_send[g][2*j+1] = 0; /* send nothing to rank+1 */
+            else {
+                k = end;
+                while (k > 0 && buf[end] == buf[k-1]) k--;
+                recv_send[g][2*j+1] = end - k; /* to send to rank+1 */
+                if (end-k >= count*chunk_dim0[g])
+                    printf("ERROR: number of same key value %"PRId64" is more than chunk size=%lld\n",
+                           buf[end], chunk_dim0[g]);
+            }
+        }
+        free(buf);
+    }
+    if (my_nKeys > 0) {
+        free(nChunks);
+        free(dim0);
+        free(dsets);
+        free(keyBuf);
+    }
+
+    /* nRecvs and nSends are calculated from nKeys number of key datasets,
+     * which are read by nKeys number of processes in parallel.  Thus, there
+     * will be nKeys calls to MPI_Scatter from nKeys number of roots. We now
+     * calculate rank of root process for each MPI_Scatter. Each time
+     * MPI_Scatter is called, all processes must agree on the root rank.
+     */
+    int root = 0;
+    int rem = nKeys % nprocs;
+    count = nKeys / nprocs;
+    if (rem) count++;
+    rem *= count;
+    for (g=0,j=0; g<nKeys; g++,j++) {
+        if (g > 0) { /* check if need to increment root */
+            if (g == rem) { j -= rem; count--; }
+            if (j % count == 0) root++;
+        }
+        /* only root process allocates buffers for recv_send */
+        int *scatter_buf = (root == rank) ? recv_send[g-my_startKey] : NULL;
+        int nElems[2];
+        MPI_Scatter(scatter_buf, 2, MPI_INT, nElems, 2, MPI_INT, root, comm);
+        nRecvs[g] = nElems[0]; /* no. elements to be received from rank-1 */
+        nSends[g] = nElems[1]; /* no. elements to be sent     to   rank+1 */
+    }
+    if (my_nKeys > 0) {
+        free(recv_send[0]);
+        free(recv_send);
+    }
+
+    return read_len;
+}
+
+/*----< pandana_hdf5_read_subarrays_align() >--------------------------------*/
 /* Call H5Dread to read subarrays of MULTIPLE datasets, one subarray at a time.
  * The hyperslab is from lower bound to upper bound, which are aligned with the
  * chunk boundaries. Once data is read, array elements at the beginning and end
@@ -933,18 +1188,22 @@ pandana_hdf5_read_subarrays_align(MPI_Comm     comm,
 {
     int d, nreqs, nprocs, rank;
     herr_t err;
+    size_t nElems, row_size;
     ssize_t read_len=0;
     MPI_Request *req;
+
+    assert(nSends>=0);
+    assert(nRecvs>=0);
 
     MPI_Comm_size(comm, &nprocs);
     MPI_Comm_rank(comm, &rank);
 
+    nElems = upper - lower + 1;
     req = (MPI_Request*) malloc(nDatasets * 2 * sizeof(MPI_Request));
     nreqs = 0;
 
     /* iterate all datasets and read subarrays */
     for (d=0; d<nDatasets; d++) {
-        size_t dtype_size;
         hsize_t one[2]={1,1}, starts[2], counts[2], dims[2];
 
         /* inquire dimension sizes of dsets[d] */
@@ -958,7 +1217,7 @@ pandana_hdf5_read_subarrays_align(MPI_Comm     comm,
         /* set subarray/hyperslab access */
         starts[0] = lower;
         starts[1] = 0;
-        counts[0] = upper - lower + 1;
+        counts[0] = nElems;
         counts[1] = dims[1];
         err = H5Sselect_hyperslab(fspace, H5S_SELECT_SET, starts, NULL, one, counts);
         if (err < 0) CHECK_ERROR(err, "H5Sselect_hyperslab");
@@ -968,14 +1227,14 @@ pandana_hdf5_read_subarrays_align(MPI_Comm     comm,
         /* get data type and size */
         hid_t dtype = H5Dget_type(dsets[d]);
         if (dtype < 0) CHECK_ERROR(dtype, "H5Dget_type");
-        dtype_size = H5Tget_size(dtype);
-        if (dtype_size == 0) CHECK_ERROR(-1, "H5Tget_size");
+        row_size = H5Tget_size(dtype);
+        if (row_size == 0) CHECK_ERROR(-1, "H5Tget_size");
 
         /* calculate read size in bytes */
-        dtype_size *= counts[1];
-        read_len += counts[0] * dtype_size;
+        row_size *= counts[1];
+        read_len += counts[0] * row_size;
 
-        unsigned char *buf_ptr = (unsigned char*)buf[d] + nRecvs * dtype_size;
+        unsigned char *buf_ptr = (unsigned char*)buf[d] + nRecvs * row_size;
 
         /* collectively read dataset d's contents */
         err = H5Dread(dsets[d], dtype, mspace, fspace, xfer_plist, buf_ptr);
@@ -988,21 +1247,105 @@ pandana_hdf5_read_subarrays_align(MPI_Comm     comm,
         err = H5Sclose(fspace);
         if (err < 0) CHECK_ERROR(err, "H5Sclose");
 
-        assert(nSends>=0);
-        assert(nRecvs>=0);
-
         /* receive from rank-1 */
         if (nRecvs > 0)
-            MPI_Irecv(buf[d], nRecvs*dtype_size, MPI_BYTE, rank-1, rank-1, comm, &req[nreqs++]);
+            MPI_Irecv(buf[d], nRecvs*row_size, MPI_BYTE, rank-1, rank-1, comm, &req[nreqs++]);
 
         /* send to rank+1 */
-        buf_ptr = buf[d] + (nRecvs + counts[0] - nSends) * dtype_size;
+        buf_ptr = buf[d] + (nRecvs + nElems - nSends) * row_size;
         if (nSends > 0)
-            MPI_Isend(buf_ptr, nSends*dtype_size, MPI_BYTE, rank+1, rank, comm, &req[nreqs++]);
+            MPI_Isend(buf_ptr, nSends*row_size, MPI_BYTE, rank+1, rank, comm, &req[nreqs++]);
     }
 
     MPI_Waitall(nreqs, req, MPI_STATUSES_IGNORE);
     free(req);
+
+    return read_len;
+}
+
+/*----< pandana_mpi_read_subarrays_align() >---------------------------------*/
+/* Call MPI-IO to read subarrays of MULTIPLE datasets. The subarrays are from
+ * lower bound to upper bound, which are aligned with the chunk boundaries.
+ * Once data is read, array elements at the beginning and end are exchanged
+ * between this process and the immediately previous process. The same for this
+ * process and immediately successive process.
+ */
+ssize_t
+pandana_mpi_read_subarrays_align(MPI_Comm     comm,
+                                 hid_t        fd,         /* HDF5 file ID */
+                                 MPI_File     fh,         /* MPI file handler */
+                                 int          nDatasets,  /* number of datasets */
+                                 const hid_t *dsets,      /* [nDatasets] dataset IDs */
+                                 size_t       lower,      /* read start array index */
+                                 size_t       upper,      /* read end   array index */
+                                 int          nRecvs,     /* no. elements recv from rank-1 */
+                                 int          nSends,     /* no. elements sent to rank+1 */
+                                 void       **buf)        /* [nDatasets] read buffer */
+{
+    int d, nreqs, nprocs, rank;
+    herr_t err;
+    size_t nElems, *row_size;
+    ssize_t read_len;
+    void **nBuf;
+    MPI_Request *req;
+
+    assert(nSends>=0);
+    assert(nRecvs>=0);
+
+    MPI_Comm_size(comm, &nprocs);
+    MPI_Comm_rank(comm, &rank);
+
+    nElems = upper - lower + 1;
+    nBuf     = (void**) malloc(nDatasets * sizeof(void*));
+    row_size = (size_t*) malloc(nDatasets * sizeof(size_t));
+    req      = (MPI_Request*) malloc(nDatasets * 2 * sizeof(MPI_Request));
+    nreqs = 0;
+
+    for (d=0; d<nDatasets; d++) {
+        hsize_t dims[2];
+        /* inquire dimension sizes of dsets[d] */
+        hid_t fspace = H5Dget_space(dsets[d]);
+        if (fspace < 0) CHECK_ERROR(fspace, "H5Dget_space");
+        int ndims = H5Sget_simple_extent_ndims(fspace);
+        if (ndims != 2) CHECK_ERROR(-1, "H5Sget_simple_extent_ndims");
+        err = H5Sget_simple_extent_dims(fspace, dims, NULL);
+        if (err < 0) CHECK_ERROR(err, "H5Sget_simple_extent_dims");
+        err = H5Sclose(fspace);
+        if (err < 0) CHECK_ERROR(err, "H5Sclose");
+
+        /* get data type and size */
+        hid_t dtype = H5Dget_type(dsets[d]);
+        if (dtype < 0) CHECK_ERROR(dtype, "H5Dget_type");
+        row_size[d] = H5Tget_size(dtype);
+        if (row_size[d] == 0) CHECK_ERROR(-1, "H5Tget_size");
+        err = H5Tclose(dtype);
+        if (err < 0) CHECK_ERROR(err, "H5Tclose");
+
+        /* calculate read size in bytes */
+        row_size[d] *= dims[1];
+
+        nBuf[d] = (unsigned char*)buf[d] + nRecvs * row_size[d];
+    }
+
+    read_len = pandana_mpi_read_subarrays(fd, fh, nDatasets, dsets, lower, upper, nBuf);
+    if (read_len < 0) CHECK_ERROR(read_len, "pandana_mpi_read_subarrays");
+
+    free(nBuf);
+
+    for (d=0; d<nDatasets; d++) {
+        /* receive from rank-1 */
+        if (nRecvs > 0)
+            MPI_Irecv(buf[d], nRecvs*row_size[d], MPI_BYTE, rank-1, rank-1, comm, &req[nreqs++]);
+
+        /* send to rank+1 */
+        unsigned char *buf_ptr = buf[d] + (nRecvs + nElems - nSends) * row_size[d];
+        if (nSends > 0)
+            MPI_Isend(buf_ptr, nSends*row_size[d], MPI_BYTE, rank+1, rank, comm, &req[nreqs++]);
+    }
+
+    MPI_Waitall(nreqs, req, MPI_STATUSES_IGNORE);
+    free(req);
+    free(row_size);
 
     return read_len;
 }
@@ -1254,13 +1597,13 @@ pandana_mpi_read_subarray(hid_t          fd,    /* HDF5 file descriptor */
  * decompressed into user buffers
  */
 ssize_t
-pandana_mpi_read_subarrays(hid_t        fd,        /* HDF5 file descriptor */
-                          MPI_File      fh,        /* MPI file handler */
-                          int           nDatasets, /* number of datasets */
-                          const hid_t  *dsets,     /* [nDatasets] dataset IDs */
-                          hsize_t       lower,     /* array index lower bound */
-                          hsize_t       upper,     /* array index upper bound */
-                          void        **buf)       /* [nDatasets] read buffer */
+pandana_mpi_read_subarrays(hid_t         fd,       /* HDF5 file descriptor */
+                           MPI_File      fh,       /* MPI file handler */
+                           int           nDatasets,/* number of datasets */
+                           const hid_t  *dsets,    /* [nDatasets] dataset IDs */
+                           hsize_t       lower,    /* array index lower bound */
+                           hsize_t       upper,    /* array index upper bound */
+                           void        **buf)      /* [nDatasets] read buffer */
 {
     int j, d, mpi_err;
     herr_t  err;
@@ -1739,8 +2082,8 @@ pandana_read_keys(MPI_Comm   comm,       /* MPI communicator */
     long long **bounds, lower_upper[2];
 
 #ifdef PANDANA_BENCHMARK
-if (seq_opt < 3)
-    return hdf5_read_keys(comm, fd, nGroups, key_names, numIDs, lowers, uppers);
+    if (seq_opt < 3)
+        return hdf5_read_keys(comm, fd, nGroups, key_names, numIDs, lowers, uppers);
 #endif
 
     MPI_Comm_size(comm, &nprocs);
@@ -1997,6 +2340,12 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
         read_len += pandana_hdf5_read_keys_align(comm, fd, nGroups, key_names,
                     lowers, uppers, nRecvs, nSends);
     }
+    else if (dset_opt == 4) {
+        nRecvs = (int*) malloc(nGroups * 2 * sizeof(int));
+        nSends = nRecvs + nGroups;
+        read_len += pandana_mpi_read_keys_align(comm, fd, fh, nGroups,
+                    key_names, lowers, uppers, nRecvs, nSends);
+    }
     else
 #endif
     {
@@ -2043,7 +2392,7 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
             buf_len = uppers[g] - lowers[g] + 1;
 #ifdef PANDANA_BENCHMARK
             /* chunk-aligned method may receive additional elements from rank-1 */
-            if (dset_opt == 3) buf_len += nRecvs[g];
+            if (dset_opt == 3 || dset_opt == 4) buf_len += nRecvs[g];
 #endif
             buf_len *= dims[1] * dtype_size;
             buf[d] = (void*) malloc(buf_len);
@@ -2064,6 +2413,16 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
             read_len += pandana_hdf5_read_subarrays_align(comm, fd, nDatasets,
                         dsets, lowers[g], uppers[g], nRecvs[g], nSends[g],
                         xfer_plist, buf);
+            /* Updated data partitioning: this process is assigned array index
+             * range from (lowers[g] - nRecvs[g]) till (uppers[g] - nSends[g])
+             */
+            lowers[g] -= nRecvs[g];
+            uppers[g] -= nSends[g];
+        }
+        else if (dset_opt == 4) {
+            read_len += pandana_mpi_read_subarrays_align(comm, fd, fh,
+                        nDatasets, dsets, lowers[g], uppers[g], nRecvs[g],
+                        nSends[g], buf);
             /* Updated data partitioning: this process is assigned array index
              * range from (lowers[g] - nRecvs[g]) till (uppers[g] - nSends[g])
              */
@@ -2094,9 +2453,9 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
     free(lowers);
 
 #ifdef PANDANA_BENCHMARK
-    if (dset_opt == 3) free(nRecvs);
+    if (dset_opt == 3 || dset_opt == 4) free(nRecvs);
 
-    if (dset_opt == 0) {
+    if (dset_opt == 0 || dset_opt == 3) {
         err = H5Pclose(xfer_plist);
         if (err < 0) CHECK_ERROR(err, "H5Pclose");
     }
