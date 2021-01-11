@@ -43,7 +43,7 @@ static size_t
 binary_search_max(long long, int64_t*, size_t);
 
 #ifdef PANDANA_BENCHMARK
-static int seq_opt;
+static int key_opt;
 static int dset_opt;
 static int posix_fd;
 static double inflate_t;
@@ -52,9 +52,9 @@ static double inflate_t;
 static double timings[5];
 
 void
-set_options(int seq_read_opt, int dset_read_opt)
+set_options(int key_read_opt, int dset_read_opt)
 {
-    seq_opt = seq_read_opt;
+    key_opt = key_read_opt;
     dset_opt = dset_read_opt;
 }
 
@@ -73,13 +73,13 @@ get_timings(double t[NUM_TIMERS])
 
 /*----< hdf5_read_keys() >---------------------------------------------------*/
 /* Using H5Dread to read key datasets. It includes 3 user-selectable methods.
- * seq_opt == 0: root reads the whole key dataset and broadcasts it. Then each
+ * key_opt == 0: root reads the whole key dataset and broadcasts it. Then each
  *               process calculates the array index range (lower and upper
  *               bound indices) responsible by itself.
- * seq_opt == 1: All processes collectively read the key dataset, and then each
+ * key_opt == 1: All processes collectively read the key dataset, and then each
  *               calculates the array index range (lower and upper bound
  *               indices) responsible by itself.
- * seq_opt == 2: root reads key dataset and calculates the array index range
+ * key_opt == 2: root reads key dataset and calculates the array index range
  *               (lower and upper bound indices) responsible by all processes
  */
 static ssize_t
@@ -111,14 +111,14 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
      * them in starts[nprocs] and ends[nprocs] */
     pandana_inq_ranges(nprocs, rank, numIDs, starts, ends);
 
-    if (seq_opt == 0) {
+    if (key_opt == 0) {
         for (g=0; g<nGroups; g++) {
             /* root reads the whole key dataset and broadcasts it. Then each
              * process calculates the array index range (lower and upper bound
              * indices) responsible by itself.
              */
             hid_t dset = H5Dopen2(fd, key_names[g], H5P_DEFAULT);
-            if (dset < 0) CHECK_ERROR(seq, "H5Dopen2");
+            if (dset < 0) CHECK_ERROR(dset, "H5Dopen2");
 
             hsize_t dims[2], chunk_dims[2];
             size_t dtype_size;
@@ -127,28 +127,28 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
             size_t buf_len = dims[0] * dtype_size;
 
             /* rank 0 reads the whole key dataset and broadcasts it */
-            int64_t *seqBuf = (int64_t*) malloc(buf_len);
-            if (seqBuf == NULL) CHECK_ERROR(-1, "malloc");
+            int64_t *keyBuf = (int64_t*) malloc(buf_len);
+            if (keyBuf == NULL) CHECK_ERROR(-1, "malloc");
             if (rank == 0) {
                 err = H5Dread(dset, H5T_STD_I64LE, H5S_ALL, H5S_ALL,
-                              H5P_DEFAULT, seqBuf);
+                              H5P_DEFAULT, keyBuf);
                 if (err < 0) CHECK_ERROR(err, "H5Dread");
                 read_len += buf_len;
             }
             err = H5Dclose(dset);
             if (err < 0) CHECK_ERROR(err, "H5Dclose");
 
-            MPI_Bcast(seqBuf, dims[0], MPI_LONG_LONG, 0, comm);
+            MPI_Bcast(keyBuf, dims[0], MPI_LONG_LONG, 0, comm);
             /* find the array index range from 'lower' to 'upper' that falls
              * into this process's partition domain.
              */
-            lowers[g] = binary_search_min(starts[rank], seqBuf, dims[0]);
-            uppers[g] = binary_search_max(ends[rank],   seqBuf, dims[0]);
+            lowers[g] = binary_search_min(starts[rank], keyBuf, dims[0]);
+            uppers[g] = binary_search_max(ends[rank],   keyBuf, dims[0]);
 
-            free(seqBuf);
+            free(keyBuf);
         }
     }
-    else if (seq_opt == 1) {
+    else if (key_opt == 1) {
         /* set MPI-IO collective transfer mode */
         hid_t xfer_plist;
         xfer_plist = H5Pcreate(H5P_DATASET_XFER);
@@ -162,22 +162,22 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
              * responsible by itself.
              */
             hid_t dset = H5Dopen2(fd, key_names[g], H5P_DEFAULT);
-            if (dset < 0) CHECK_ERROR(seq, "H5Dopen2");
+            if (dset < 0) CHECK_ERROR(dset, "H5Dopen2");
 
             hsize_t dims[2], chunk_dims[2];
             size_t dtype_size;
             inq_dset_meta(dset, &dtype_size, dims, chunk_dims);
             if (dims[1] != 1) CHECK_ERROR(err, "dims[1] != 1");
             size_t buf_len = dims[0] * dtype_size;
-            int64_t *seqBuf = (int64_t*) malloc(buf_len);
-            if (seqBuf == NULL) CHECK_ERROR(-1, "malloc");
+            int64_t *keyBuf = (int64_t*) malloc(buf_len);
+            if (keyBuf == NULL) CHECK_ERROR(-1, "malloc");
 
             err = H5Dread(dset, H5T_STD_I64LE, H5S_ALL, H5S_ALL, xfer_plist,
-                          seqBuf);
+                          keyBuf);
             /* all processes independently reads the whole dataset is even
              * worse.
              * err = H5Dread(dset, H5T_STD_I64LE, H5S_ALL, H5S_ALL,
-             *               H5P_DEFAULT, seqBuf);
+             *               H5P_DEFAULT, keyBuf);
              */
             if (err < 0) CHECK_ERROR(err, "H5Dread");
             read_len += buf_len;
@@ -185,17 +185,17 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
             /* find the array index range from 'lower' to 'upper' that falls
              * into this process's partition domain.
              */
-            lowers[g] = binary_search_min(starts[rank], seqBuf, dims[0]);
-            uppers[g] = binary_search_max(ends[rank],   seqBuf, dims[0]);
+            lowers[g] = binary_search_min(starts[rank], keyBuf, dims[0]);
+            uppers[g] = binary_search_max(ends[rank],   keyBuf, dims[0]);
 
-            free(seqBuf);
+            free(keyBuf);
             err = H5Dclose(dset);
             if (err < 0) CHECK_ERROR(err, "H5Dclose");
         }
         err = H5Pclose(xfer_plist);
         if (err < 0) CHECK_ERROR(err, "H5Pclose");
     }
-    else if (seq_opt == 2) {
+    else if (key_opt == 2) {
         long long *bounds;
         if (rank == 0) {
             bounds = (long long*) malloc(nprocs * 2 * sizeof(long long));
@@ -207,7 +207,7 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
                  * (lower and upper bound indices) responsible by all processes
                  */
                 hid_t dset = H5Dopen2(fd, key_names[g], H5P_DEFAULT);
-                if (dset < 0) CHECK_ERROR(seq, "H5Dopen2");
+                if (dset < 0) CHECK_ERROR(dset, "H5Dopen2");
 
                 hsize_t dims[2], chunk_dims[2];
                 size_t dtype_size;
@@ -215,10 +215,10 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
                 if (dims[1] != 1) CHECK_ERROR(err, "dims[1] != 1");
                 size_t buf_len = dims[0] * dtype_size;
 
-                int64_t *seqBuf = (int64_t*) malloc(buf_len);
-                if (seqBuf == NULL) CHECK_ERROR(-1, "malloc");
+                int64_t *keyBuf = (int64_t*) malloc(buf_len);
+                if (keyBuf == NULL) CHECK_ERROR(-1, "malloc");
                 err = H5Dread(dset, H5T_STD_I64LE, H5S_ALL, H5S_ALL,
-                              H5P_DEFAULT, seqBuf);
+                              H5P_DEFAULT, keyBuf);
                 if (err < 0) CHECK_ERROR(err, "H5Dread");
                 read_len += buf_len;
 
@@ -226,10 +226,10 @@ hdf5_read_keys(MPI_Comm   comm,       /* MPI communicator */
                 if (err < 0) CHECK_ERROR(err, "H5Dclose");
 
                 for (j=0, k=0; j<nprocs; j++) {
-                    bounds[k++] = binary_search_min(starts[j], seqBuf, dims[0]);
-                    bounds[k++] = binary_search_max(ends[j],   seqBuf, dims[0]);
+                    bounds[k++] = binary_search_min(starts[j], keyBuf, dims[0]);
+                    bounds[k++] = binary_search_max(ends[j],   keyBuf, dims[0]);
                 }
-                free(seqBuf);
+                free(keyBuf);
             }
             /* root scatters the lower and upper bounds to other processes */
             MPI_Scatter(bounds, 2, MPI_LONG_LONG, lower_upper, 2,
@@ -2102,7 +2102,7 @@ pandana_read_keys(MPI_Comm   comm,       /* MPI communicator */
     long long **bounds, lower_upper[2];
 
 #ifdef PANDANA_BENCHMARK
-    if (seq_opt < 3)
+    if (key_opt < 3)
         return hdf5_read_keys(comm, fd, nGroups, key_names, numIDs, lowers, uppers);
 #endif
 
@@ -2152,15 +2152,15 @@ pandana_read_keys(MPI_Comm   comm,       /* MPI communicator */
     key_names += my_startGrp;
 
 #ifdef PANDANA_BENCHMARK
-if (seq_opt == 3) {
+if (key_opt == 3) {
 #endif
     /* allocate arrays of dataset IDs, dimension 0 sizes, read buffers */
     hid_t *dsets = (hid_t*) malloc(my_nGroups*sizeof(hid_t));
     if (dsets == NULL) CHECK_ERROR(-1, "malloc");
     hsize_t *dim0 = (hsize_t*) malloc(my_nGroups * sizeof(hsize_t));
     if (dim0 == NULL) CHECK_ERROR(-1, "malloc");
-    void **seqBuf = (void**) malloc(my_nGroups*sizeof(void*));
-    if (seqBuf == NULL) CHECK_ERROR(-1, "malloc");
+    void **keyBuf = (void**) malloc(my_nGroups*sizeof(void*));
+    if (keyBuf == NULL) CHECK_ERROR(-1, "malloc");
 
     for (g=0; g<my_nGroups; g++) {
         /* open dataset */
@@ -2173,29 +2173,29 @@ if (seq_opt == 3) {
         dim0[g] = dims[0];
         size_t buf_len = dims[0] * dtype_size;
         /* allocate read buffers */
-        seqBuf[g] = (void*) malloc(buf_len);
-        if (seqBuf[g] == NULL) CHECK_ERROR(-1, "malloc");
+        keyBuf[g] = (void*) malloc(buf_len);
+        if (keyBuf[g] == NULL) CHECK_ERROR(-1, "malloc");
     }
 
-    /* collectively read all key datasets into seqBuf[] */
-    read_len = pandana_mpi_read_dsets(comm, fd, fh, my_nGroups, dsets, seqBuf);
+    /* collectively read all key datasets into keyBuf[] */
+    read_len = pandana_mpi_read_dsets(comm, fd, fh, my_nGroups, dsets, keyBuf);
 
     /* calculate lower and upper bounds for all processes */
     for (g=0; g<my_nGroups; g++) {
         for (k=0, p=0; p<nprocs; p++) {
-            bounds[g][k++] = binary_search_min(starts[p], seqBuf[g], dim0[g]);
-            bounds[g][k++] = binary_search_max(ends[p],   seqBuf[g], dim0[g]);
+            bounds[g][k++] = binary_search_min(starts[p], keyBuf[g], dim0[g]);
+            bounds[g][k++] = binary_search_max(ends[p],   keyBuf[g], dim0[g]);
         }
-        free(seqBuf[g]);
+        free(keyBuf[g]);
         herr_t err = H5Dclose(dsets[g]);
         if (err < 0) CHECK_ERROR(err, "H5Dclose");
     }
-    free(seqBuf);
+    free(keyBuf);
     free(dim0);
     free(dsets);
 #ifdef PANDANA_BENCHMARK
 }
-else if (seq_opt == 4) {
+else if (key_opt == 4) {
     read_len = 0;
     for (g=0; g<my_nGroups; g++) {
         herr_t err;
@@ -2208,18 +2208,18 @@ else if (seq_opt == 4) {
         if (dims[1] != 1) CHECK_ERROR(err, "dims[1] != 1");
         size_t buf_len = dims[0] * dtype_size;
         /* allocate read buffers */
-        void *seqBuf = (void*) malloc(buf_len);
-        if (seqBuf == NULL) CHECK_ERROR(-1, "malloc");
+        void *keyBuf = (void*) malloc(buf_len);
+        if (keyBuf == NULL) CHECK_ERROR(-1, "malloc");
 
         /* pandana_posix_read_dset() is an independent call */
-        read_len += pandana_posix_read_dset(dset, posix_fd, seqBuf);
+        read_len += pandana_posix_read_dset(dset, posix_fd, keyBuf);
 
         /* calculate lower and upper bounds for all processes */
         for (k=0, p=0; p<nprocs; p++) {
-            bounds[g][k++] = binary_search_min(starts[p], seqBuf, dims[0]);
-            bounds[g][k++] = binary_search_max(ends[p],   seqBuf, dims[0]);
+            bounds[g][k++] = binary_search_min(starts[p], keyBuf, dims[0]);
+            bounds[g][k++] = binary_search_max(ends[p],   keyBuf, dims[0]);
         }
-        free(seqBuf);
+        free(keyBuf);
         err = H5Dclose(dset);
         if (err < 0) CHECK_ERROR(err, "H5Dclose");
     }
@@ -2268,7 +2268,7 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
     MPI_File fh;
 #ifdef PANDANA_BENCHMARK
     int *nRecvs, *nSends;
-    double open_t, read_seq_t, read_dset_t, close_t;
+    double open_t, read_key_t, read_dset_t, close_t;
     inflate_t=0.0;
 #endif
 
@@ -2316,7 +2316,7 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
     mpi_err = MPI_Info_free(&info);
     if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_Info_free");
 #ifdef ENABLE_PARALLEL_H5FOPEN
-    if (seq_opt == 4) {
+    if (key_opt == 4) {
         posix_fd = open(infile, O_RDONLY);
         if (posix_fd < 0) CHECK_ERROR(-1, "open");
     }
@@ -2326,7 +2326,7 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
 
     /* Read key datasets ----------------------------------------------------*/
     MPI_Barrier(comm);
-    read_seq_t = MPI_Wtime();
+    read_key_t = MPI_Wtime();
 #endif
 
     /* calculate this process's responsible array index range (lower and upper
@@ -2363,7 +2363,7 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
     free(key_names);
 
 #ifdef PANDANA_BENCHMARK
-    read_seq_t = MPI_Wtime() - read_seq_t;
+    read_key_t = MPI_Wtime() - read_key_t;
 
     /* read the remaining datasets ------------------------------------------*/
     MPI_Barrier(comm);
@@ -2391,7 +2391,7 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
         for (d=0; d<nDatasets; d++) {
             /* open dataset */
             dsets[d] = H5Dopen2(fd, groups[g].dset_names[d+1], H5P_DEFAULT);
-            if (dsets[d] < 0) CHECK_ERROR(dset, "H5Dopen2");
+            if (dsets[d] < 0) CHECK_ERROR(dsets[d], "H5Dopen2");
             size_t dtype_size;
             hsize_t dims[2];
             inq_dset_meta(dsets[d], &dtype_size, dims, NULL);
@@ -2479,11 +2479,11 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
     if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_close");
 
 #ifdef PANDANA_BENCHMARK
-    if (seq_opt == 4) close(posix_fd);
+    if (key_opt == 4) close(posix_fd);
     close_t = MPI_Wtime() - close_t;
 
     timings[0] = open_t;
-    timings[1] = read_seq_t;
+    timings[1] = read_key_t;
     timings[2] = read_dset_t;
     timings[3] = close_t;
     timings[4] = inflate_t;
@@ -2685,7 +2685,7 @@ pandana_dataset_parallelism(MPI_Comm    comm,     /* MPI communicator */
     close_t = MPI_Wtime() - close_t;
 
     timings[0] = open_t;
-    timings[1] = 0.0; /* read_seq_t */
+    timings[1] = 0.0; /* read_key_t */
     timings[2] = read_dset_t;
     timings[3] = close_t;
     timings[4] = 0.0; /* inflate_t */

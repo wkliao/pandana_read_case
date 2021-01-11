@@ -41,7 +41,8 @@
 static int
 read_dataset_names(int          rank,
                    const char  *listfile,   /* file contains a list of names */
-                   NOvA_group **gList)      /* OUT */
+                   NOvA_group **gList,      /* OUT */
+                   const char  *keyName)    /* name of key dataset */
 {
     FILE *fptr;
     int j, g, len, nGroups, nDatasets, nDsetGrp, maxDsetGrp;
@@ -112,8 +113,8 @@ read_dataset_names(int          rank,
             if ((*gList)[nGroups].dset_names == NULL) CHECK_ERROR(-1, "malloc");
         }
 
-        if (!strcmp(strtok(NULL, "/"), "evt.seq")) {
-            /* add dataset evt.seq to first in the group */
+        if (!strcmp(strtok(NULL, "/"), keyName)) {
+            /* add key dataset to first in the group */
             for (j=nDatasets; j>0; j--)
                 (*gList)[nGroups].dset_names[j] = (*gList)[nGroups].dset_names[j-1];
             (*gList)[nGroups].dset_names[0] = (char*) malloc(len + 1);
@@ -131,13 +132,13 @@ read_dataset_names(int          rank,
     (*gList)[nGroups].nDatasets = nDatasets;
     nGroups++;
 
-    /* check if dataset evt.seq is missing */
+    /* check if key dataset is missing */
     for (g=0; g<nGroups; g++) {
-        /* evt.seq is set to be the first dataset of each group */
+        /* key dataset is set to be the first dataset of each group */
         strcpy(name, (*gList)[g].dset_names[0]);
         strtok(name, "/");
-        if (strcmp(strtok(NULL, "/"), "evt.seq")) {
-            printf("Error: group[g=%d] %s contains no evt.seq\n",g, name);
+        if (strcmp(strtok(NULL, "/"), keyName)) {
+            printf("Error: group[g=%d] %s contains no key dataset %s\n",g, name, keyName);
             return -1;
         }
     }
@@ -151,7 +152,9 @@ chunk_statistics(MPI_Comm    comm,
                  const char *infile,
                  NOvA_group *groups,
                  int         nGroups,
-                 int         seq_opt)
+                 int         key_opt,
+                 const char *global_key,
+                 const char *local_key)
 {
     herr_t  err;
     hid_t   fd, dset;
@@ -160,8 +163,8 @@ chunk_statistics(MPI_Comm    comm,
     int nchunks_shared=0, max_shared_chunks=0;
     int max_nchunks_read=0, min_nchunks_read=INT_MAX, total_nchunks=0;
     long long aggr_nchunks_read, my_nchunks_read=0, my_nchunks_read_nokeys=0;
-    long long all_dset_size, all_evt_seq_size;
-    long long all_dset_size_z, all_evt_seq_size_z;
+    long long all_dset_size, all_key_size;
+    long long all_dset_size_z, all_key_size_z;
     long long numIDs, maxRead=0, minRead=LONG_MAX;
     size_t *grp_sizes, *grp_zip_sizes, *grp_nChunks, **nChunks;
 
@@ -169,7 +172,7 @@ chunk_statistics(MPI_Comm    comm,
     MPI_Comm_rank(comm, &rank);
 
 #ifdef PANDANA_BENCHMARK
-    extern void set_options(int seq_read_opt, int dset_read_opt);
+    extern void set_options(int key_read_opt, int dset_read_opt);
     set_options(2, 0);
 
     MPI_File fh = MPI_FILE_NULL;
@@ -182,8 +185,8 @@ chunk_statistics(MPI_Comm    comm,
     /* collect statistics describing chunk contention */
     fd = H5Fopen(infile, H5F_ACC_RDONLY, H5P_DEFAULT);
 
-    /* Inquire number of globally unique IDs (size of dset_global_ID) */
-    dset = H5Dopen2(fd, "/spill/evt.seq", H5P_DEFAULT);
+    /* Inquire number of globally unique IDs (size of global_key) */
+    dset = H5Dopen2(fd, global_key, H5P_DEFAULT);
     hid_t fspace = H5Dget_space(dset);
     hsize_t dims[2];
     err = H5Sget_simple_extent_dims(fspace, dims, NULL);
@@ -192,7 +195,7 @@ chunk_statistics(MPI_Comm    comm,
     numIDs = dims[0];
 
     if (rank == 0)
-        printf("Number of unique IDs (size of /spill/evt.seq)=%lld\n",numIDs);
+        printf("Number of unique IDs (size of %s)=%lld\n",global_key,numIDs);
 
     /* calculate this process's responsible array index range (lower and upper
      * bounds) for each group */
@@ -228,9 +231,9 @@ chunk_statistics(MPI_Comm    comm,
         my_startGrp += nGroups % nprocs;
 
     all_dset_size = 0;
-    all_evt_seq_size = 0;
+    all_key_size = 0;
     all_dset_size_z = 0;
-    all_evt_seq_size_z = 0;
+    all_key_size_z = 0;
     all_nDatasets = 0;
     for (g=0; g<nGroups; g++) {
         hsize_t dset_size, dims[2], chunk_dims[2];
@@ -239,34 +242,34 @@ chunk_statistics(MPI_Comm    comm,
 
         all_nDatasets += groups[g].nDatasets;
 
-        hid_t seq = H5Dopen2(fd, groups[g].dset_names[0], H5P_DEFAULT);
-        hid_t fspace = H5Dget_space(seq);
+        hid_t key = H5Dopen2(fd, groups[g].dset_names[0], H5P_DEFAULT);
+        hid_t fspace = H5Dget_space(key);
         err = H5Sget_simple_extent_dims(fspace, dims, NULL);
         err = H5Sclose(fspace);
-        hid_t chunk_plist = H5Dget_create_plist(seq);
+        hid_t chunk_plist = H5Dget_create_plist(key);
         H5Pget_chunk(chunk_plist, 2, chunk_dims);
         err = H5Pclose(chunk_plist);
-        hid_t dtype = H5Dget_type(seq);
+        hid_t dtype = H5Dget_type(key);
         size_t dtype_size = H5Tget_size(dtype);
         err = H5Tclose(dtype);
 
         dset_size = dims[0] * dims[1] * dtype_size;
-        all_evt_seq_size += dset_size;
+        all_key_size += dset_size;
         grp_sizes[g] += dset_size;
 
         nChunks[g][0] = dims[0] / chunk_dims[0];
         if (dims[0] % chunk_dims[0]) nChunks[g][0]++;
 
-        if (seq_opt == 0) {
+        if (key_opt == 0) {
             if (rank == 0) my_nchunks_read += nChunks[g][0];
-        } else if (seq_opt == 1) {
+        } else if (key_opt == 1) {
             my_nchunks_read += nChunks[g][0];
-        } else if (seq_opt == 2) {
+        } else if (key_opt == 2) {
             if (rank == 0) my_nchunks_read += nChunks[g][0];
-        } else if (seq_opt == 3) {
+        } else if (key_opt == 3) {
             if (g >= my_startGrp && g < my_startGrp + my_nGroups)
                 my_nchunks_read += nChunks[g][0];
-        } else if (seq_opt == 4) {
+        } else if (key_opt == 4) {
             if (rank == 0) my_nchunks_read += nChunks[g][0];
         }
 
@@ -278,14 +281,14 @@ chunk_statistics(MPI_Comm    comm,
         for (j=0; j<nChunks[g][0]; j++) {
             haddr_t addr;
             hsize_t size;
-            err = H5Dget_chunk_info_by_coord(seq, offset, NULL, &addr, &size);
-            all_evt_seq_size_z += size;
+            err = H5Dget_chunk_info_by_coord(key, offset, NULL, &addr, &size);
+            all_key_size_z += size;
             offset[0] += chunk_dims[0];
             grp_zip_sizes[g] += size;
         }
 
-        if (seq_opt == 1) nchunks_shared += nChunks[g][0];
-        err = H5Dclose(seq);
+        if (key_opt == 1) nchunks_shared += nChunks[g][0];
+        err = H5Dclose(key);
 
         long long lower_upper[2];
         lower_upper[0] = lowers[g];
@@ -298,8 +301,8 @@ chunk_statistics(MPI_Comm    comm,
             /* open dataset */
             dset = H5Dopen2(fd, groups[g].dset_names[d], H5P_DEFAULT);
 
-            /* collect metadata of ect.seq again, as this process may not have
-             * collected metadata of all evt.seq
+            /* collect metadata of key dataset again, as this process may not
+             * have collected metadata of all key datasets
              */
 
             /* inquire dimension sizes of dset */
@@ -316,7 +319,7 @@ chunk_statistics(MPI_Comm    comm,
              */
             if (chunk_dims[1] != dims[1]) CHECK_ERROR(-1, "chunk_dims[1] != dims[1]");
 
-            /* data type of evt.seq is 64-bit integer */
+            /* data type of key dataset is of 64-bit integer */
             hid_t dtype = H5Dget_type(dset);
             size_t dtype_size = H5Tget_size(dtype);
             err = H5Tclose(dtype);
@@ -398,19 +401,19 @@ chunk_statistics(MPI_Comm    comm,
     if (rank == 0) {
         printf("Read amount MAX=%.2f MiB MIN=%.2f MiB (per dataset, per process)\n",
                (float)maxRead/1048576.0,(float)minRead/1048576.0);
-        printf("Amount of evt.seq datasets %.2f MiB = %.2f GiB (compressed %.2f MiB = %.2f GiB)\n",
-               (float)all_evt_seq_size/1048576.0, (float)all_evt_seq_size/1073741824.0,
-               (float)all_evt_seq_size_z/1048576.0, (float)all_evt_seq_size_z/1073741824.0);
-        printf("Amount of  other  datasets %.2f MiB = %.2f GiB (compressed %.2f MiB = %.2f GiB)\n",
+        printf("Amount of key   datasets %.2f MiB = %.2f GiB (compressed %.2f MiB = %.2f GiB)\n",
+               (float)all_key_size/1048576.0, (float)all_key_size/1073741824.0,
+               (float)all_key_size_z/1048576.0, (float)all_key_size_z/1073741824.0);
+        printf("Amount of other datasets %.2f MiB = %.2f GiB (compressed %.2f MiB = %.2f GiB)\n",
                (float)all_dset_size/1048576.0, (float)all_dset_size/1073741824.0,
                (float)all_dset_size_z/1048576.0, (float)all_dset_size_z/1073741824.0);
-        all_dset_size += all_evt_seq_size;
-        all_dset_size_z += all_evt_seq_size_z;
+        all_dset_size += all_key_size;
+        all_dset_size_z += all_key_size_z;
         printf("Sum amount of all datasets %.2f MiB = %.2f GiB (compressed %.2f MiB = %.2f GiB)\n",
                (float)all_dset_size/1048576.0, (float)all_dset_size/1073741824.0,
                (float)all_dset_size_z/1048576.0, (float)all_dset_size_z/1073741824.0);
-        printf("total number of chunks in all %d datasets (exclude /spill/evt.seq): %d\n",
-               all_nDatasets, total_nchunks);
+        printf("total number of chunks in all %d datasets (exclude %s): %d\n",
+               all_nDatasets, global_key, total_nchunks);
         printf("Aggregate number of chunks read by all processes: %lld\n",
                aggr_nchunks_read);
         printf("        averaged per process: %.2f\n", (float)aggr_nchunks_read/nprocs);
@@ -432,9 +435,9 @@ chunk_statistics(MPI_Comm    comm,
     MPI_Barrier(comm);
     free(grp_sizes);
 
-    printf("rank %3d: no. chunks read=%lld include evt.seq (max=%d min=%d avg=%.2f among %d datasets, exclude evt.seq)\n",
-           rank, my_nchunks_read, max_nchunks_read, min_nchunks_read,
-           (float)my_nchunks_read_nokeys/(float)all_nDatasets, all_nDatasets-nGroups);
+    printf("rank %3d: no. chunks read=%lld include key %s (max=%d min=%d avg=%.2f among %d datasets, exclude key %s)\n",
+           rank, my_nchunks_read, local_key, max_nchunks_read, min_nchunks_read,
+           (float)my_nchunks_read_nokeys/(float)all_nDatasets, all_nDatasets-nGroups, local_key);
 
     for (g=0; g<nGroups; g++)
         free(nChunks[g]);
@@ -448,53 +451,57 @@ chunk_statistics(MPI_Comm    comm,
 static void
 usage(char *progname)
 {
-#define USAGE   "\
-  [-h]           print this command usage message\n\
-  [-p number]    performance profiling method (0 or 1)\n\
-                 0: report file open, close, read timings (default)\n\
-                 1: report number of chunks read per process\n\
-  [-s number]    read method for key datasets (0, 1, 2, 3, or 4)\n\
-                 0: root process HDF5 reads and broadcasts (default)\n\
-                 1: all processes HDF5 read the entire keys collectively\n\
-                 2: root process HDF5 reads each key, one at a time,\n\
-                    calculates, scatters boundaries to other processes\n\
-                 3: distribute key reading among processes, make one MPI\n\
-                    collective read to read all asigned keys, and scatter\n\
-                    boundaries to other processes\n\
-                 4: root POSIX reads all chunks of keys, one dataset at a\n\
-                    time, decompress, and scatter boundaries\n\
-  [-m number]    read method for other datasets (0, 1, 2, or 3)\n\
-                 0: use H5Dread, one dataset at a time (default)\n\
-                 1: use MPI_file_read_all, one dataset at a time\n\
-                 2: use MPI_file_read_all, all datasets in one group at a\n\
-                    time\n\
-                 3: use chunk-aligned partitioning and H5Dread to read one\n\
-                    dataset at a time. When set, option -s is ignored.\n\
-                    Reading key datasets are distributed using H5Dread, one\n\
-                    dataset at a time.\n\
-                 4: use chunk-aligned partitioning and MPI-IO to read all\n\
-                    datasets in a group. When used, -s argument is ignored.\n\
-                    Reading key datasets are distributed among processes and\n\
-                    MPI_File_read_all to read all assigned key dataset.\n\
-  [-r number]    parallelization method (0 or 1)\n\
-                 0: data parallelism - all processes read each dataset in\n\
-                    parallel (default)\n\
-                 1: group parallelism - processes are divided among groups\n\
-                    then data parallelism within each groups\n\
-                 2: dataset parallelism - divide all datasets of all groups\n\
-                    among processes. When set, options -s and -m are ignored.\n\
-  [-l file_name] name of file containing dataset names to be read\n\
-  [-i file_name] name of input HDF5 file\n\
+#define USAGE "\
+  [-h]        print this command usage message\n\
+  [-p number] performance profiling method (0 or 1)\n\
+              0: report file open, close, read timings (default)\n\
+              1: report number of chunks read per process\n\
+  [-s number] read method for key datasets (0, 1, 2, 3, or 4)\n\
+              0: root process HDF5 reads all keys and broadcasts, all\n\
+                 processes calculate their own boundaries\n\
+              1: all processes HDF5 read all keys collectively, calculate\n\
+                 their own boundaries\n\
+              2: root process HDF5 reads keys, calculates and scatters\n\
+                 boundaries to other processes\n\
+              3: distribute key reading among processes, read all assigned\n\
+                 keys using one MPI collective read, calculate and scatter\n\
+                 boundaries to other processes (default)\n\
+              4: distribute key reading among processes, read all assigned\n\
+                 keys using POSIX read, calculate and scatter boundaries to\n\
+                 other processes\n\
+  [-m number] read method for other datasets (0, 1, 2, or 3)\n\
+              0: collective H5Dread, one dataset at a time\n\
+              1: MPI_file_read_all, one dataset at a time\n\
+              2: MPI_file_read_all, all datasets in one group at a time\n\
+                 (default)\n\
+              3: use chunk-aligned partitioning and collective H5Dread one\n\
+                 dataset at a time. When set, option -s is ignored. Reading\n\
+                 key datasets are distributed among processes, independent\n\
+                 H5Dread, one dataset at a time.\n\
+              4: use chunk-aligned partitioning and one MPI_File_read_all to\n\
+                 read all datasets in a group. When set, option -s argument\n\
+                 is ignored. Reading key datasets are distributed among\n\
+                 processes, one MPI_File_read_all to read all assigned key\n\
+                 dataset.\n\
+  [-r number] parallelization method (0, 1, or 2)\n\
+              0: data parallelism - all processes read each dataset in\n\
+                 parallel (default)\n\
+              1: group parallelism - processes are divided into groups, then\n\
+                 data parallelism is used within each group\n\
+              2: dataset parallelism - divide all datasets of all groups\n\
+                 among processes. When set, options -s and -m are ignored.\n\
+  [-l fname]  name of file containing dataset names to be read\n\
+  [-i fname]  name of input HDF5 file\n\
   *ph5concat version _PH5CONCAT_VERSION_ of _PH5CONCAT_RELEASE_DATE_\n"
 
-    printf("Usage: %s [-h] [-p number] [-s number] [-m number] [-r number] [-l file_name] [-i file_name]\n%s\n",
+    printf("Usage: %s [-h] [-p number] [-s number] [-m number] [-r number] [-l fname] [-i fname]\n%s\n",
            progname, USAGE);
 }
 
 /*----< main() >-------------------------------------------------------------*/
 int main(int argc, char **argv)
 {
-    int seq_opt=0, dset_opt=0, profile=0;
+    int key_opt, dset_opt=0, profile=0;
     int c, d, g, nprocs, rank, nGroups, parallelism=0;
     char *listfile=NULL, *infile=NULL;
     double all_t, max_t[6], min_t[6];
@@ -505,6 +512,10 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 
+    /* Defaults that gives best performance */
+    key_opt = 3;
+    dset_opt = 2;
+
     /* command-line arguments */
     while ((c = getopt(argc, argv, "hr:p:s:m:l:i:")) != -1)
         switch(c) {
@@ -514,7 +525,7 @@ int main(int argc, char **argv)
                       break;
             case 'p': profile = atoi(optarg);
                       break;
-            case 's': seq_opt = atoi(optarg);
+            case 's': key_opt = atoi(optarg);
                       break;
             case 'm': dset_opt = atoi(optarg);
                       break;
@@ -539,7 +550,7 @@ int main(int argc, char **argv)
         }
         goto fn_exit;
     }
-    if (seq_opt < 0 || seq_opt > 4) { /* option for reading keys */
+    if (key_opt < 0 || key_opt > 4) { /* option for reading keys */
         if (rank  == 0) {
             printf("Error: option -s must be 0, 1, 2, 3, or 4\n");
             usage(argv[0]);
@@ -561,16 +572,13 @@ int main(int argc, char **argv)
         goto fn_exit;
     }
 
-#ifndef PANDANA_BENCHMARK
-    /* When not in benchmark mode, use the options giving best performance */
-    seq_opt = 3;
-    dset_opt = 2;
-#endif
+    char *global_key = "/spill/evt.seq";
+    char *local_key = "evt.seq";
 
     /* From file 'listfile', read dataset names, calculate number of datasets,
      * number of groups, maximum number of datasets among groups
      */
-    nGroups = read_dataset_names(rank, listfile, &groups);
+    nGroups = read_dataset_names(rank, listfile, &groups, local_key);
     if (nGroups == -1) goto fn_exit;
 
     /* print the running parameters and metadata of input file */
@@ -597,15 +605,15 @@ int main(int argc, char **argv)
             printf("Distributed H5Dread and scatters aligned boundaries\n");
         else if (dset_opt == 4)
             printf("Distributed MPI reads and scatters aligned boundaries\n");
-        else if (seq_opt == 0)
+        else if (key_opt == 0)
             printf("root process H5Dread and broadcasts\n");
-        else if (seq_opt == 1)
+        else if (key_opt == 1)
             printf("all processes H5Dread collectively\n");
-        else if (seq_opt == 2)
+        else if (key_opt == 2)
             printf("root process H5Dread and scatters boundaries\n");
-        else if (seq_opt == 3)
+        else if (key_opt == 3)
             printf("Distributed MPI collective read, decompress, and scatters boundaries\n");
-        else if (seq_opt == 4)
+        else if (key_opt == 4)
             printf("Distributed POSIX read, decompress, and scatters boundaries\n");
 
         printf("Read other datasets method: ");
@@ -633,8 +641,8 @@ int main(int argc, char **argv)
     fflush(stdout);
 
 #ifdef PANDANA_BENCHMARK
-    extern void set_options(int seq_read_opt, int dset_read_opt);
-    set_options(seq_opt, dset_opt);
+    extern void set_options(int key_read_opt, int dset_read_opt);
+    set_options(key_opt, dset_opt);
 
     extern void init_timers(void);
     init_timers();
@@ -643,15 +651,13 @@ int main(int argc, char **argv)
     MPI_Barrier(MPI_COMM_WORLD);
     all_t = MPI_Wtime();
 
-    char *dset_global_ID = "/spill/evt.seq";
-
 #ifdef PANDANA_BENCHMARK
     if (parallelism < 2 && dset_opt != 3 && dset_opt != 4)
 #else
     if (parallelism < 2)
 #endif
     {
-        /* Inquire number of globally unique IDs (size of dset_global_ID)
+        /* Inquire number of globally unique IDs (size of global_key)
 	 * This is not required when using dataset parallelism or chunk-aligned
 	 * dataset option */
 	herr_t err;
@@ -661,8 +667,8 @@ int main(int argc, char **argv)
                     rank,  infile, strerror(errno));
             goto fn_exit;
         }
-        hid_t dset = H5Dopen2(fd, dset_global_ID, H5P_DEFAULT);
-        if (dset < 0) CHECK_ERROR(seq, "H5Dopen2");
+        hid_t dset = H5Dopen2(fd, global_key, H5P_DEFAULT);
+        if (dset < 0) CHECK_ERROR(dset, "H5Dopen2");
         hid_t fspace = H5Dget_space(dset);
         if (fspace < 0) CHECK_ERROR(dset, "H5Dget_space");
         hsize_t dims[2];
@@ -698,7 +704,7 @@ int main(int argc, char **argv)
 
     /* find the max/min timings among all processes.
      *   timings[0] : open_t      -- file open
-     *   timings[1] : read_seq_t  -- read evt.seq datasets
+     *   timings[1] : read_key_t  -- read key datasets
      *   timings[2] : read_dset_t -- read other datasets
      *   timings[3] : close_t     -- file close
      *   timings[4] : inflate_t   -- data inflation
@@ -738,7 +744,7 @@ int main(int argc, char **argv)
     MPI_Barrier(MPI_COMM_WORLD);
 
     if (profile)
-        chunk_statistics(MPI_COMM_WORLD, infile, groups, nGroups, seq_opt);
+        chunk_statistics(MPI_COMM_WORLD, infile, groups, nGroups, key_opt, global_key, local_key);
 
 fn_exit:
     if (groups != NULL) {

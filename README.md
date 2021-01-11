@@ -202,43 +202,47 @@ a combinations of the two.
 ### Run Command usage:
   ```
   % ./pandana_benchmark -h
-  Usage: ./pandana_benchmark [-h] [-p number] [-s number] [-m number] [-r number] [-l file_name] [-i file_name]
-    [-h]           print this command usage message
-    [-p number]    performance profiling method (0 or 1)
-                   0: report file open, close, read timings (default)
-                   1: report number of chunks read per process
-    [-s number]    read method for key datasets (0, 1, 2, 3, or 4)
-                   0: root process HDF5 reads and broadcasts (default)
-                   1: all processes HDF5 read the entire keys collectively
-                   2: root process HDF5 reads each key, one at a time,
-                      calculates, scatters boundaries to other processes
-                   3: distribute key reading among processes, make one MPI
-                      collective read to read all asigned keys, and scatter
-                      boundaries to other processes
-                   4: root POSIX reads all chunks of keys, one dataset at a
-                      time, decompress, and scatter boundaries
-    [-m number]    read method for other datasets (0, 1, 2, 3, or 4)
-                   0: use H5Dread, one dataset at a time (default)
-                   1: use MPI_file_read_all, one dataset at a time
-                   2: use MPI_file_read_all, all datasets in one group at a
-                      time
-                   3: use chunk-aligned partitioning and H5Dread to read one
-                      dataset at a time. When set, option -s is ignored.
-                      Reading key datasets are distributed using H5Dread, one
-                      dataset at a time.
-                   4: use chunk-aligned partitioning and MPI-IO to read all
-                      datasets in a group. When used, -s argument is ignored.
-                      Reading key datasets are distributed among processes and
-                      MPI_File_read_all to read all assigned key dataset.
-    [-r number]    parallelization method (0 or 1)
-                   0: data parallelism - all processes read each dataset in
-                      parallel (default)
-                   1: group parallelism - processes are divided among groups
-                      then data parallelism within each groups
-                   2: dataset parallelism - divide all datasets of all groups
-                      among processes. When set, options -s and -m are ignored.
-    [-l file_name] name of file containing dataset names to be read
-    [-i file_name] name of input HDF5 file
+  Usage: ./pandana_benchmark [-h] [-p number] [-s number] [-m number] [-r number] [-l fname] [-i fname]
+    [-h]        print this command usage message
+    [-p number] performance profiling method (0 or 1)
+                0: report file open, close, read timings (default)
+                1: report number of chunks read per process
+    [-s number] read method for key datasets (0, 1, 2, 3, or 4)
+                0: root process HDF5 reads all keys and broadcasts, all
+                   processes calculate their own boundaries
+                1: all processes HDF5 read all keys collectively, calculate
+                   their own boundaries
+                2: root process HDF5 reads keys, calculates and scatters
+                   boundaries to other processes
+                3: distribute key reading among processes, read all assigned
+                   keys using one MPI collective read, calculate and scatter
+                   boundaries to other processes (default)
+                4: distribute key reading among processes, read all assigned
+                   keys using POSIX read, calculate and scatter boundaries to
+                   other processes
+    [-m number] read method for other datasets (0, 1, 2, or 3)
+                0: collective H5Dread, one dataset at a time
+                1: MPI_file_read_all, one dataset at a time
+                2: MPI_file_read_all, all datasets in one group at a time
+                   (default)
+                3: use chunk-aligned partitioning and collective H5Dread one
+                   dataset at a time. When set, option -s is ignored. Reading
+                   key datasets are distributed among processes, independent
+                   H5Dread, one dataset at a time.
+                4: use chunk-aligned partitioning and one MPI_File_read_all to
+                   read all datasets in a group. When set, option -s argument
+                   is ignored. Reading key datasets are distributed among
+                   processes, one MPI_File_read_all to read all assigned key
+                   dataset.
+    [-r number] parallelization method (0, 1, or 2)
+                0: data parallelism - all processes read each dataset in
+                   parallel (default)
+                1: group parallelism - processes are divided into groups, then
+                   data parallelism is used within each group
+                2: dataset parallelism - divide all datasets of all groups
+                   among processes. When set, options -s and -m are ignored.
+    [-l fname]  name of file containing dataset names to be read
+    [-i fname]  name of input HDF5 file
     *ph5concat version 1.1.0 of March 1, 2020.
   ```
 
@@ -247,56 +251,55 @@ A sample input file named 'dset.txt' is provided in this folder which includes
 names of a list of datasets to be read from the concatenated HDF5 file.
 Example run and output:
   ```
-  % mpiexec -n 4 ./pandana_benchmark -l dset.txt -i nd_165_files_with_evtseq.h5 -p1
-
+  % mpiexec -n 4 ./pandana_benchmark -l dset.txt -i nd_165_files_with_evtseq.h5 -p 1
   Number of MPI processes = 4
   Input dataset name file 'dset.txt'
   Input concatenated HDF5 file 'nd_165_files_with_evtseq.h5'
   Number of groups   to read = 15
   Number of datasets to read = 123
   MAX/MIN no. datasets per group = 13 / 5
-  Read key   datasets method: root process H5Dread and broadcasts
-  Read other datasets method: H5Dread, one dataset at a time
+  Read key   datasets method: Distributed MPI collective read, decompress, and scatters boundaries
+  Read other datasets method: MPI collective read and decompress, all datasets in one group at a time
   Parallelization method: data parallelism (all processes read individual datasets in parallel)
   ----------------------------------------------------
   MAX and MIN among all 4 processes
-  MAX read amount: 468.02 MiB (0.46 GiB)
-  MIN read amount: 224.62 MiB (0.22 GiB)
-  MAX time: open=0.00 key=0.71 datasets=0.93 close=0.00 inflate=0.00 TOTAL=1.65
-  MIN time: open=0.00 key=0.71 datasets=0.93 close=0.00 inflate=0.00 TOTAL=1.65
+  MAX read amount: 314.25 MiB (0.31 GiB)
+  MIN read amount: 275.65 MiB (0.27 GiB)
+  MAX time: open=0.00 key=0.19 datasets=1.15 close=0.00 inflate=0.87 TOTAL=1.35
+  MIN time: open=0.00 key=0.19 datasets=1.14 close=0.00 inflate=0.59 TOTAL=1.35
   ----------------------------------------------------
   Number of unique IDs (size of /spill/evt.seq)=410679
   Read amount MAX=4.77 MiB MIN=0.39 MiB (per dataset, per process)
-  Amount of evt.seq datasets  262.81 MiB = 0.26 GiB (compressed  12.18 MiB = 0.01 GiB)
-  Amount of  other  datasets  924.93 MiB = 0.90 GiB (compressed 181.23 MiB = 0.18 GiB)
-  Sum amount of all datasets 1187.74 MiB = 1.16 GiB (compressed 193.42 MiB = 0.19 GiB)
-  total number of chunks in all 123 datasets (exclude /spill/evt.seq): 1232
-  Aggregate number of chunks read by all processes: 1556
-          averaged per process: 389.00
-          averaged per process per dataset: 3.16
-  Out of 1232 chunks, number of chunks read by two or more processes: 320
-  Out of 1232 chunks, most shared chunk is read by number of processes: 3
+  Amount of key   datasets 262.81 MiB = 0.26 GiB (compressed 12.24 MiB = 0.01 GiB)
+  Amount of other datasets 924.93 MiB = 0.90 GiB (compressed 181.22 MiB = 0.18 GiB)
+  Sum amount of all datasets 1187.74 MiB = 1.16 GiB (compressed 193.46 MiB = 0.19 GiB)
+  total number of chunks in all 123 datasets (exclude /spill/evt.seq): 1150
+  Aggregate number of chunks read by all processes: 1474
+          averaged per process: 368.50
+          averaged per process per dataset: 3.00
+  Out of 1150 chunks, number of chunks read by two or more processes: 320
+  Out of 1150 chunks, most shared chunk is read by number of processes: 3
   ----------------------------------------------------
-  group                                rec.energy.numu size   118 MiB (zipped   35 MiB) nChunks=122
-  group                                        rec.hdr size    61 MiB (zipped    2 MiB) nChunks=64
-  group                                rec.sel.contain size    83 MiB (zipped   11 MiB) nChunks=86
-  group                                rec.sel.cvn2017 size    66 MiB (zipped    8 MiB) nChunks=68
-  group                          rec.sel.cvnProd3Train size    66 MiB (zipped    8 MiB) nChunks=68
-  group                                  rec.sel.remid size    66 MiB (zipped    4 MiB) nChunks=68
-  group                                        rec.slc size   101 MiB (zipped   21 MiB) nChunks=104
-  group                                      rec.spill size    61 MiB (zipped    2 MiB) nChunks=64
-  group                                 rec.trk.cosmic size    74 MiB (zipped    2 MiB) nChunks=77
-  group                                 rec.trk.kalman size    83 MiB (zipped    3 MiB) nChunks=86
-  group                          rec.trk.kalman.tracks size    94 MiB (zipped   18 MiB) nChunks=95
-  group                         rec.vtx.elastic.fuzzyk size    54 MiB (zipped    2 MiB) nChunks=59
-  group                     rec.vtx.elastic.fuzzyk.png size    92 MiB (zipped    2 MiB) nChunks=97
-  group              rec.vtx.elastic.fuzzyk.png.shwlid size   153 MiB (zipped   67 MiB) nChunks=162
-  group                                          spill size     9 MiB (zipped    1 MiB) nChunks=12
-
-
-  rank   0: no. chunks read=494 include evt.seq (max=4 min=1 avg=4.02 among 108 datasets, exclude evt.seq)
-  rank   1: no. chunks read=392 include evt.seq (max=6 min=1 avg=3.19 among 108 datasets, exclude evt.seq)
-  rank   2: no. chunks read=332 include evt.seq (max=5 min=2 avg=2.70 among 108 datasets, exclude evt.seq)
-  rank   3: no. chunks read=338 include evt.seq (max=6 min=1 avg=2.75 among 108 datasets, exclude evt.seq)
+  group                                rec.energy.numu size   118 MiB (zipped   35 MiB) nChunks=117
+  group                                        rec.hdr size    61 MiB (zipped    2 MiB) nChunks=63
+  group                                rec.sel.contain size    83 MiB (zipped   11 MiB) nChunks=81
+  group                                rec.sel.cvn2017 size    66 MiB (zipped    8 MiB) nChunks=63
+  group                          rec.sel.cvnProd3Train size    66 MiB (zipped    8 MiB) nChunks=63
+  group                                  rec.sel.remid size    66 MiB (zipped    4 MiB) nChunks=63
+  group                                        rec.slc size   101 MiB (zipped   21 MiB) nChunks=99
+  group                                      rec.spill size    61 MiB (zipped    2 MiB) nChunks=63
+  group                                 rec.trk.cosmic size    74 MiB (zipped    2 MiB) nChunks=63
+  group                                 rec.trk.kalman size    83 MiB (zipped    3 MiB) nChunks=72
+  group                          rec.trk.kalman.tracks size    94 MiB (zipped   18 MiB) nChunks=90
+  group                         rec.vtx.elastic.fuzzyk size    54 MiB (zipped    2 MiB) nChunks=56
+  group                     rec.vtx.elastic.fuzzyk.png size    92 MiB (zipped    2 MiB) nChunks=91
+  group              rec.vtx.elastic.fuzzyk.png.shwlid size   153 MiB (zipped   67 MiB) nChunks=156
+  group                                          spill size     9 MiB (zipped    1 MiB) nChunks=10
+  
+  
+  rank   0: no. chunks read=273 include key evt.seq (max=3 min=1 avg=1.93 among 108 datasets, exclude key evt.seq)
+  rank   1: no. chunks read=442 include key evt.seq (max=4 min=1 avg=3.30 among 108 datasets, exclude key evt.seq)
+  rank   2: no. chunks read=381 include key evt.seq (max=4 min=2 avg=2.80 among 108 datasets, exclude key evt.seq)
+  rank   3: no. chunks read=378 include key evt.seq (max=5 min=1 avg=2.85 among 108 datasets, exclude key evt.seq)
   ```
 ---
