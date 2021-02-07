@@ -937,8 +937,8 @@ pandana_hdf5_read_keys_align(MPI_Comm   comm,
         int *scatter_buf = (roots[g] == rank) ? recv_send[g-my_startKey] : NULL;
         int nElems[2];
         MPI_Scatter(scatter_buf, 2, MPI_INT, nElems, 2, MPI_INT, roots[g], comm);
-        nRecvs[g] = nElems[0]; /* number of elements to be received from rank-1 */
-        nSends[g] = nElems[1]; /* number of elements to be sent     to   rank+1 */
+        nRecvs[g] = nElems[0]; /* no. elements to be received from rank-1 */
+        nSends[g] = nElems[1]; /* no. elements to be sent     to   rank+1 */
     }
     if (my_nKeys > 0) {
         free(recv_send[0]);

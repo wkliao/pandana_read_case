@@ -233,12 +233,12 @@ a combinations of the two.
         df = tables['sel_nuecosrej']
         return (df.distallpngtop    > 63.0) & \
                (df.distallpngbottom > 12.0) & \
-               (df. distallpngeast  > 12.0) & \
+               (df.distallpngeast   > 12.0) & \
                (df.distallpngwest   > 12.0) & \
-               (df. distallpngfront > 18.0) & \
+               (df.distallpngfront  > 18.0) & \
                (df.distallpngback   > 18.0)
     ```
-  + **Currently, only the dataset reading part is implemented. The
+  + :bangbang: **Currently, only the dataset reading part is implemented. The
     redistribution part has not been added.**
 
 ### Run Command usage:
@@ -346,7 +346,7 @@ Example run and output:
   ```
 ---
 
-References:
+## References:
 1. M. Paterno, J. Kowalkowski, and S. Sehrish.
    ["Parallel Event Selection on HPC Systems"](https://doi.org/10.1051/epjconf/201921404059),
    in the International Conference on Computing in High Energy and Nuclear
