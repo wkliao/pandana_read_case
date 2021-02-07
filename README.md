@@ -262,7 +262,7 @@ a combinations of the two.
                 4: distribute key reading among processes, read all assigned
                    keys using POSIX read, calculate and scatter boundaries to
                    other processes
-    [-m number] read method for other datasets (0, 1, 2, or 3)
+    [-m number] read method for other datasets (0, 1, 2, 3, or 4)
                 0: collective H5Dread, one dataset at a time
                 1: MPI_file_read_all, one dataset at a time
                 2: MPI_file_read_all, all datasets in one group at a time

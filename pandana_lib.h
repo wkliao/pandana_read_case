@@ -7,6 +7,9 @@
 #include <mpi.h>
 #include "hdf5.h"
 
+#define COLL  0
+#define INDEP 1
+
 int
 pandana_inq_ranges(int        nprocs, /* number of MPI processes */
                    int        rank,   /* MPI rank of this process */
@@ -42,12 +45,14 @@ ssize_t
 pandana_mpi_read_dsets(MPI_Comm   comm,      /* MPI communicator */
                        hid_t      fd,        /* HDF5 file ID */
                        MPI_File   fh,        /* MPI file handler */
+                       int        mode,      /* collective or independent mode */
                        int        nDatasets, /* number of datasets */
                        hid_t     *dsets,     /* IN:  [nDatasets] dataset IDs */
                        void     **buf);      /* OUT: [nDatasets] read buffers */
 ssize_t
 pandana_mpi_read_subarray(hid_t          fd,     /* HDF5 file descriptor */
                           MPI_File       fh,     /* MPI file handler */
+                          int            mode,   /* collective or independent mode */
                           const hid_t    dset,   /* dataset ID */
                           hsize_t        lower,  /* array index lower bound */
                           hsize_t        upper,  /* array index upper bound */
@@ -55,24 +60,27 @@ pandana_mpi_read_subarray(hid_t          fd,     /* HDF5 file descriptor */
 ssize_t
 pandana_mpi_read_subarrays(hid_t        fd,       /* HDF5 file descriptor */
                           MPI_File      fh,       /* MPI file handler */
+                          int           mode,     /* collective or independent mode */
                           int           nDatasets,/* number of datasets */
                           const hid_t  *dsets,    /* [nDatasets] dataset IDs */
                           hsize_t       lower,    /* array index lower bound */
                           hsize_t       upper,    /* array index upper bound */
                           void        **buf);     /* [nDatasets] user buffer */
 ssize_t
-pandana_mpi_read_subarrays_aggr(hid_t         fd,        /* HDF5 file descriptor */
-                                MPI_File      fh,        /* MPI file handler */
-                                int           nDatasets, /* number of datasets */
-                                const hid_t  *dsets,     /* [nDatasets] dataset IDs */
-                                hsize_t       lower,     /* lower bound */
-                                hsize_t       upper,     /* upper bound */
-                                void        **buf);      /* [nDatasets] user buffer */
+pandana_mpi_read_subarrays_aggr(hid_t   fd,        /* HDF5 file descriptor */
+                          MPI_File      fh,        /* MPI file handler */
+                          int           mode,      /* collective or independent mode */
+                          int           nDatasets, /* number of datasets */
+                          const hid_t  *dsets,     /* [nDatasets] dataset IDs */
+                          hsize_t       lower,     /* lower bound */
+                          hsize_t       upper,     /* upper bound */
+                          void        **buf);      /* [nDatasets] user buffer */
 
 ssize_t
 pandana_read_keys(MPI_Comm   comm,       /* MPI communicator */
                   hid_t      fd,         /* HDF5 file ID */
                   MPI_File   fh,         /* MPI file handler */
+                  int        mode,       /* collective or independent mode */
                   int        nGroups,    /* number of key datasets */
                   char     **key_names,  /* [nGroups] key dataset names */
                   long long  numIDs,     /* number of globally unique IDs */

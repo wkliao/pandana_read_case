@@ -440,6 +440,7 @@ ssize_t
 pandana_mpi_read_dsets(MPI_Comm    comm,     /* MPI communicator */
                        hid_t       fd,       /* HDF5 file ID */
                        MPI_File    fh,       /* MPI file handler */
+                       int         mode,     /* collective or independent */
                        int         nDatasets,/* number of datasets */
                        hid_t      *dsets,    /* IN:  [nDatasets] dataset IDs */
                        void      **buf)      /* OUT: [nDatasets] read buffers */
@@ -453,11 +454,15 @@ pandana_mpi_read_dsets(MPI_Comm    comm,     /* MPI communicator */
 
     if (nDatasets == 0) {
         /* This process has nothing to read, it must still participate the MPI
-         * collective calls to MPI_File_set_view() and MPI_File_read_all()
+         * collective calls to MPI_File_set_view()
          */
         mpi_err = MPI_File_set_view(fh, 0, MPI_BYTE, MPI_BYTE, "native",
                                     MPI_INFO_NULL);
         if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_set_view");
+
+        if (mode == INDEP) return 1;
+
+        /* in collective I/O mode, all must participate MPI_File_read_all() */
         mpi_err = MPI_File_read_all(fh, NULL, 0, MPI_BYTE, MPI_STATUS_IGNORE);
         if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
         return 1;
@@ -591,9 +596,14 @@ pandana_mpi_read_dsets(MPI_Comm    comm,     /* MPI communicator */
     if (zipBuf == NULL) CHECK_ERROR(-1, "malloc");
     zipBuf_ptr = zipBuf;
 
-    /* collective read */
-    mpi_err = MPI_File_read_all(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
-    if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
+    if (mode == COLL) { /* collective read */
+        mpi_err = MPI_File_read_all(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
+        if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
+    }
+    else { /* independent read */
+        mpi_err = MPI_File_read(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
+        if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read");
+    }
 
     /* decompress individual chunks into buf[] */
     unsigned char *chunkBuf = (unsigned char*) malloc(max_chunk_size);
@@ -968,6 +978,7 @@ ssize_t
 pandana_mpi_read_keys_align(MPI_Comm   comm,
                             hid_t      fd,      /* HDF5 file ID */
                             MPI_File   fh,      /* MPI file handle */
+                            int        mode,    /* collective or independent */
                             int        nKeys,   /* number of key datasets */
                             char     **keyNames,/* IN:  [nKeys] dataset names */
                             size_t    *lowers,  /* OUT: [nKeys] read start array index */
@@ -1088,7 +1099,8 @@ pandana_mpi_read_keys_align(MPI_Comm   comm,
      * the assigned key datasets. Non-root processes just participate the
      * collective read calls.
      */
-    read_len = pandana_mpi_read_dsets(comm, fd, fh, my_nKeys, dsets, keyBuf);
+    read_len = pandana_mpi_read_dsets(comm, fd, fh, mode, my_nKeys, dsets,
+                                      keyBuf);
 
     /* calculates send/receive amount between 2 consecutive processes */
     for (g=0; g<my_nKeys; g++) {
@@ -1294,6 +1306,7 @@ ssize_t
 pandana_mpi_read_subarrays_align(MPI_Comm     comm,
                                  hid_t        fd,         /* HDF5 file ID */
                                  MPI_File     fh,         /* MPI file handler */
+                                 int          mode,       /* collective or independent */
                                  int          nDatasets,  /* number of datasets */
                                  const hid_t *dsets,      /* [nDatasets] dataset IDs */
                                  size_t       lower,      /* read start array index */
@@ -1347,7 +1360,8 @@ pandana_mpi_read_subarrays_align(MPI_Comm     comm,
         nBuf[d] = (unsigned char*)buf[d] + nRecvs * row_size[d];
     }
 
-    read_len = pandana_mpi_read_subarrays(fd, fh, nDatasets, dsets, lower, upper, nBuf);
+    read_len = pandana_mpi_read_subarrays(fd, fh, mode, nDatasets, dsets,
+                                          lower, upper, nBuf);
     if (read_len < 0) CHECK_ERROR(read_len, "pandana_mpi_read_subarrays");
 
     free(nBuf);
@@ -1451,6 +1465,7 @@ pandana_hdf5_read_subarrays(hid_t        fd,         /* HDF5 file ID */
 ssize_t
 pandana_mpi_read_subarray(hid_t          fd,    /* HDF5 file descriptor */
                           MPI_File       fh,    /* MPI file handler */
+                          int            mode,  /* collective or independent */
                           const hid_t    dset,  /* dataset ID */
                           hsize_t        lower, /* array index lower bound */
                           hsize_t        upper, /* array index upper bound */
@@ -1544,9 +1559,14 @@ pandana_mpi_read_subarray(hid_t          fd,    /* HDF5 file descriptor */
     if (zipBuf == NULL) CHECK_ERROR(-1, "malloc");
     zipBuf_ptr = zipBuf;
 
-    /* collective read */
-    mpi_err = MPI_File_read_all(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
-    if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
+    if (mode == COLL) { /* collective read */
+        mpi_err = MPI_File_read_all(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
+        if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
+    }
+    else { /* independent read */
+        mpi_err = MPI_File_read(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
+        if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read");
+    }
 
     /* decompress each chunk into buf */
     size_t whole_chunk_size = chunk_dims[0] * chunk_dims[1] * dtype_size;
@@ -1619,6 +1639,7 @@ pandana_mpi_read_subarray(hid_t          fd,    /* HDF5 file descriptor */
 ssize_t
 pandana_mpi_read_subarrays(hid_t         fd,       /* HDF5 file descriptor */
                            MPI_File      fh,       /* MPI file handler */
+                           int           mode,     /* collective or independent */
                            int           nDatasets,/* number of datasets */
                            const hid_t  *dsets,    /* [nDatasets] dataset IDs */
                            hsize_t       lower,    /* array index lower bound */
@@ -1718,9 +1739,14 @@ pandana_mpi_read_subarrays(hid_t         fd,       /* HDF5 file descriptor */
         if (zipBuf == NULL) CHECK_ERROR(-1, "malloc");
         zipBuf_ptr = zipBuf;
 
-        /* collective read */
-        mpi_err = MPI_File_read_all(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
-        if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
+        if (mode == COLL) { /* collective read */
+            mpi_err = MPI_File_read_all(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
+            if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
+        }
+        else { /* independent read */
+            mpi_err = MPI_File_read(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
+            if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read");
+        }
 
         /* decompress each chunk into buf[d] */
         size_t whole_chunk_size = chunk_dims[0] * chunk_dims[1] * dtype_size;
@@ -1792,6 +1818,7 @@ pandana_mpi_read_subarrays(hid_t         fd,       /* HDF5 file descriptor */
 ssize_t
 pandana_mpi_read_subarrays_aggr(hid_t         fd,        /* HDF5 file descriptor */
                                 MPI_File      fh,        /* MPI file handler */
+                                int           mode,      /* collective or independent */
                                 int           nDatasets, /* number of datasets */
                                 const hid_t  *dsets,     /* [nDatasets] dataset IDs */
                                 hsize_t       lower,     /* lower bound */
@@ -1935,9 +1962,14 @@ pandana_mpi_read_subarrays_aggr(hid_t         fd,        /* HDF5 file descriptor
     if (zipBuf == NULL) CHECK_ERROR(-1, "malloc");
     zipBuf_ptr = zipBuf;
 
-    /* collective read */
-    mpi_err = MPI_File_read_all(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
-    if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
+    if (mode == COLL) { /* collective read */
+        mpi_err = MPI_File_read_all(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
+        if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read_all");
+    }
+    else { /* independent read */
+        mpi_err = MPI_File_read(fh, zipBuf, zip_len, MPI_BYTE, MPI_STATUS_IGNORE);
+        if (mpi_err != MPI_SUCCESS) CHECK_ERROR(-1, "MPI_File_read");
+    }
 
     /* decompress individual chunks into whole_chunk and copy to buf[d] */
     unsigned char *whole_chunk = (unsigned char*) malloc(max_chunk_size);
@@ -2091,6 +2123,7 @@ ssize_t
 pandana_read_keys(MPI_Comm   comm,       /* MPI communicator */
                   hid_t      fd,         /* HDF5 file ID */
                   MPI_File   fh,         /* MPI file handler */
+                  int        mode,       /* collective or independent */
                   int        nGroups,    /* number of key datasets */
                   char     **key_names,  /* [nGroups] key dataset names */
                   long long  numIDs,     /* number of globally unique IDs */
@@ -2178,7 +2211,8 @@ if (key_opt == 3) {
     }
 
     /* collectively read all key datasets into keyBuf[] */
-    read_len = pandana_mpi_read_dsets(comm, fd, fh, my_nGroups, dsets, keyBuf);
+    read_len = pandana_mpi_read_dsets(comm, fd, fh, mode, my_nGroups, dsets,
+                                      keyBuf);
 
     /* calculate lower and upper bounds for all processes */
     for (g=0; g<my_nGroups; g++) {
@@ -2262,7 +2296,7 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
 {
     herr_t  err;
     hid_t   fd, fapl_id;
-    int d, g, nprocs, rank, mpi_err;
+    int d, g, nprocs, rank, mode, mpi_err;
     ssize_t read_len=0;
     size_t *lowers, *uppers;
     MPI_File fh;
@@ -2329,6 +2363,8 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
     read_key_t = MPI_Wtime();
 #endif
 
+    mode = INDEP; /* use independent I/O mode */
+
     /* calculate this process's responsible array index range (lower and upper
      * inclusive bounds) for each group */
     lowers = (size_t*) malloc(nGroups * 2 * sizeof(size_t));
@@ -2350,15 +2386,15 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
     else if (dset_opt == 4) {
         nRecvs = (int*) malloc(nGroups * 2 * sizeof(int));
         nSends = nRecvs + nGroups;
-        read_len += pandana_mpi_read_keys_align(comm, fd, fh, nGroups,
+        read_len += pandana_mpi_read_keys_align(comm, fd, fh, mode, nGroups,
                     key_names, lowers, uppers, nRecvs, nSends);
     }
     else
 #endif
     {
         /* calculate this process's lowers[] and uppers[] for all groups */
-        read_len += pandana_read_keys(comm, fd, fh, nGroups, key_names, numIDs,
-                                      lowers, uppers);
+        read_len += pandana_read_keys(comm, fd, fh, mode, nGroups, key_names,
+                                      numIDs, lowers, uppers);
     }
     free(key_names);
 
@@ -2380,6 +2416,7 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
 #endif
 
     /* Read the remaining datasets by iterating all groups */
+    mode = COLL; /* use collective I/O mode */
     for (g=0; g<nGroups; g++) {
 
         /* open datasets, inquire sizes, in order to allocate read buffers */
@@ -2413,8 +2450,8 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
                         lowers[g], uppers[g], xfer_plist, buf);
         }
         else if (dset_opt == 1) {
-            read_len += pandana_mpi_read_subarrays(fd, fh, nDatasets, dsets,
-                        lowers[g], uppers[g], buf);
+            read_len += pandana_mpi_read_subarrays(fd, fh, mode, nDatasets,
+                        dsets, lowers[g], uppers[g], buf);
         }
         else if (dset_opt == 3) {
             read_len += pandana_hdf5_read_subarrays_align(comm, fd, nDatasets,
@@ -2427,7 +2464,7 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
             uppers[g] -= nSends[g];
         }
         else if (dset_opt == 4) {
-            read_len += pandana_mpi_read_subarrays_align(comm, fd, fh,
+            read_len += pandana_mpi_read_subarrays_align(comm, fd, fh, mode,
                         nDatasets, dsets, lowers[g], uppers[g], nRecvs[g],
                         nSends[g], buf);
             /* Updated data partitioning: this process is assigned array index
@@ -2440,7 +2477,7 @@ pandana_data_parallelism(MPI_Comm    comm,     /* MPI communicator */
 #endif
         {
             /* read datasets using MPI-IO, all datasets in group g at once */
-            read_len += pandana_mpi_read_subarrays_aggr(fd, fh, nDatasets,
+            read_len += pandana_mpi_read_subarrays_aggr(fd, fh, mode, nDatasets,
                         dsets, lowers[g], uppers[g], buf);
         }
 

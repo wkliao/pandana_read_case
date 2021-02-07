@@ -209,7 +209,7 @@ chunk_statistics(MPI_Comm    comm,
         key_names[g] = groups[g].dset_names[0];
 
     /* calculate this process's lowers[] and uppers[] for all groups */
-    pandana_read_keys(MPI_COMM_WORLD, fd, fh, nGroups, key_names,
+    pandana_read_keys(MPI_COMM_WORLD, fd, fh, INDEP, nGroups, key_names,
                       numIDs, lowers, uppers);
     free(key_names);
 
@@ -469,7 +469,7 @@ usage(char *progname)
               4: distribute key reading among processes, read all assigned\n\
                  keys using POSIX read, calculate and scatter boundaries to\n\
                  other processes\n\
-  [-m number] read method for other datasets (0, 1, 2, or 3)\n\
+  [-m number] read method for other datasets (0, 1, 2, 3, or 4)\n\
               0: collective H5Dread, one dataset at a time\n\
               1: MPI_file_read_all, one dataset at a time\n\
               2: MPI_file_read_all, all datasets in one group at a time\n\
